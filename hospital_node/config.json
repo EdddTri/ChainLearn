@@ -1,0 +1,14 @@
+{
+    "contract_address": "",
+    "provider_url": "http://127.0.0.1:8545",
+    "chain_id": 1337,
+    "hospital_name": "Hospital_A",
+    "model_save_dir": "./models",
+    "data_dir": "./data",
+    "training": {
+        "epochs": 5,
+        "batch_size": 32,
+        "learning_rate": 0.001
+    },
+    "aggregation_server": "http://127.0.0.1:5000"
+}

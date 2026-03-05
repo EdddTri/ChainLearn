@@ -1,0 +1,20 @@
+{
+  "name": "federated-learning-smart-contracts",
+  "version": "1.0.0",
+  "description": "Solidity smart contracts for decentralized federated learning orchestration",
+  "scripts": {
+    "compile": "npx hardhat compile",
+    "test": "npx hardhat test",
+    "deploy:local": "npx hardhat run scripts/deploy_coordinator.js --network localhost",
+    "node": "npx hardhat node",
+    "clean": "npx hardhat clean"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "hardhat": "^2.22.0"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.0.0"
+  }
+}
+

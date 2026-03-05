@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+smart_contracts/artifacts/
+smart_contracts/cache/
+smart_contracts/typechain-types/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# Model files
+*.pt
+*.pth
+hospital_node/models/
+hospital_node/data/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
