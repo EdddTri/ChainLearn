@@ -57,6 +57,7 @@ def _load_accounts() -> List[str]:
 
 
 CAPACITY_ENUM = {"Weak": 0, "Medium": 1, "Strong": 2}
+MODEL_TYPE_ENUM = {"Weak": 0, "Medium": 1, "Strong": 2}  # Light=0, Medium=1, Heavy=2
 SCALE = 10_000
 NUM_CLASSES = 2
 PROVIDER = "http://127.0.0.1:8545"
@@ -223,11 +224,13 @@ def main(rounds: int):
                     max_samples=256,
                 )
                 model_hash = bytes.fromhex(results["model_hash"].removeprefix("0x")[:64])
+                model_type = MODEL_TYPE_ENUM[hp["capacity_class"]]
                 node_client._tx(
                     node_client.contract.functions.submitUpdate(
                         model_hash,
                         int(results["confidence"]),
                         int(results["ece"]),
+                        model_type,
                     )
                 )
                 trained_models.append(results["model"])
@@ -253,6 +256,15 @@ def main(rounds: int):
         conf = y_final.max(dim=1).values.item()
         print(f"       Predicted class: {pred}")
         print(f"       Confidence: {conf:.4f}")
+
+        # Record ensemble prediction hash on-chain
+        import hashlib
+        pred_bytes = y_final.numpy().tobytes()
+        pred_hash = hashlib.sha256(pred_bytes).digest()
+        owner._tx(
+            owner.contract.functions.recordEnsemblePrediction(pred_hash, len(profiles))
+        )
+        print(f"       Ensemble hash recorded on-chain: 0x{pred_hash.hex()[:16]}...")
 
     finally:
         if hardhat_proc and hardhat_proc.poll() is None:

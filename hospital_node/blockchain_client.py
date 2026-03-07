@@ -83,9 +83,14 @@ class BlockchainClient:
     def start_new_round(self) -> dict:
         return self._send_tx(self.contract.functions.startNewRound())
 
-    def submit_update(self, model_hash: bytes, confidence: int, ece: int) -> dict:
+    def submit_update(self, model_hash: bytes, confidence: int, ece: int, model_type: int = 0) -> dict:
         return self._send_tx(
-            self.contract.functions.submitUpdate(model_hash, confidence, ece)
+            self.contract.functions.submitUpdate(model_hash, confidence, ece, model_type)
+        )
+
+    def record_ensemble_prediction(self, prediction_hash: bytes, participant_count: int) -> dict:
+        return self._send_tx(
+            self.contract.functions.recordEnsemblePrediction(prediction_hash, participant_count)
         )
 
     def get_current_round(self) -> int:
@@ -104,3 +109,26 @@ class BlockchainClient:
         return self.contract.functions.calculateWeight(
             Web3.to_checksum_address(hospital_address)
         ).call()
+
+    def get_hospital_info(self, hospital_address: str) -> dict:
+        result = self.contract.functions.getHospitalInfo(
+            Web3.to_checksum_address(hospital_address)
+        ).call()
+        return {
+            "name": result[0],
+            "capacity_class": result[1],
+            "assigned_model_type": result[2],
+            "confidence": result[3],
+            "ece": result[4],
+            "is_registered": result[5],
+            "poc_benchmark_hash": result[6],
+            "rounds_participated": result[7],
+        }
+
+    def get_ensemble_record(self, round_number: int) -> dict:
+        result = self.contract.functions.getEnsembleRecord(round_number).call()
+        return {
+            "prediction_hash": result[0],
+            "participant_count": result[1],
+            "timestamp": result[2],
+        }

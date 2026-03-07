@@ -15,10 +15,15 @@ describe("FLCoordinator", function () {
     const BONUS_PER_ROUND = 500n;
     const MAX_BONUS = 2_500n;
 
-    // Enum values
+    // CapacityClass enum values
     const Weak = 0;
     const Medium = 1;
     const Strong = 2;
+
+    // ModelType enum values
+    const Light = 0;
+    const MediumModel = 1;
+    const Heavy = 2;
 
     // Dummy PoC benchmark hash
     const benchmarkHash = ethers.keccak256(ethers.toUtf8Bytes("poc-benchmark-v1"));
@@ -28,9 +33,6 @@ describe("FLCoordinator", function () {
 
     /**
      * Mirror the on-chain weight formula in JS for test assertions.
-     *   baseWeight = capMul * confidence * (SCALE - ece) / SCALE^2
-     *   bonus      = min(roundsParticipated * 500, 2500)
-     *   w          = min(baseWeight + bonus, MAX_WEIGHT)
      */
     function expectedWeight(capMul, confidence, ece, roundsParticipated = 0n) {
         const raw = capMul * confidence * (SCALE - ece);
@@ -40,6 +42,15 @@ describe("FLCoordinator", function () {
         let w = baseWeight + bonus;
         if (w > MAX_WEIGHT) w = MAX_WEIGHT;
         return w;
+    }
+
+    /**
+     * Return the correct ModelType for a CapacityClass.
+     */
+    function modelTypeFor(capacityClass) {
+        if (capacityClass === Weak) return Light;
+        if (capacityClass === Medium) return MediumModel;
+        return Heavy;
     }
 
     beforeEach(async function () {
@@ -85,7 +96,6 @@ describe("FLCoordinator", function () {
                 .to.equal(Strong);
         });
 
-
         it("should reject benchmark hash signed by the wrong hospital key", async function () {
             await expect(
                 contract.registerHospital(
@@ -97,6 +107,7 @@ describe("FLCoordinator", function () {
                 )
             ).to.be.revertedWith("Invalid benchmark signature");
         });
+
         it("should reject duplicate registration", async function () {
             await contract.registerHospital(hospitalA.address, "A", Medium, benchmarkHash, await sigFor(hospitalA, benchmarkHash));
             await expect(
@@ -123,6 +134,33 @@ describe("FLCoordinator", function () {
                 .to.equal(hashA);
             expect((await contract.getHospitalInfo(hospitalB.address)).pocBenchmarkHash)
                 .to.equal(hashB);
+        });
+    });
+
+    // =========================================================================
+    //  Model Type Assignment
+    // =========================================================================
+    describe("Model Type Assignment", function () {
+        it("should map Weak -> Light", async function () {
+            expect(await contract.getModelType(Weak)).to.equal(Light);
+        });
+
+        it("should map Medium -> Medium", async function () {
+            expect(await contract.getModelType(Medium)).to.equal(MediumModel);
+        });
+
+        it("should map Strong -> Heavy", async function () {
+            expect(await contract.getModelType(Strong)).to.equal(Heavy);
+        });
+
+        it("should return assignedModelType in getHospitalInfo", async function () {
+            await contract.registerHospital(hospitalA.address, "A", Weak, benchmarkHash, await sigFor(hospitalA, benchmarkHash));
+            await contract.registerHospital(hospitalB.address, "B", Medium, benchmarkHash, await sigFor(hospitalB, benchmarkHash));
+            await contract.registerHospital(hospitalC.address, "C", Strong, benchmarkHash, await sigFor(hospitalC, benchmarkHash));
+
+            expect((await contract.getHospitalInfo(hospitalA.address)).assignedModelType).to.equal(Light);
+            expect((await contract.getHospitalInfo(hospitalB.address)).assignedModelType).to.equal(MediumModel);
+            expect((await contract.getHospitalInfo(hospitalC.address)).assignedModelType).to.equal(Heavy);
         });
     });
 
@@ -155,27 +193,42 @@ describe("FLCoordinator", function () {
             );
         });
 
-        it("should accept a valid submission", async function () {
+        it("should accept a valid submission with correct model type", async function () {
             await contract.startNewRound();
 
             await expect(
                 contract
                     .connect(hospitalA)
-                    .submitUpdate(modelHash, 9500, 300)
+                    .submitUpdate(modelHash, 9500, 300, Heavy)
             )
                 .to.emit(contract, "UpdateSubmitted")
-                .withArgs(1, hospitalA.address, modelHash, 9500, 300);
+                .withArgs(1, hospitalA.address, modelHash, 9500, 300, Heavy);
 
             const sub = await contract.getRoundSubmission(1, hospitalA.address);
             expect(sub.modelHash).to.equal(modelHash);
             expect(sub.confidence).to.equal(9500);
             expect(sub.ece).to.equal(300);
             expect(sub.timestamp).to.be.gt(0);
+            expect(sub.modelType).to.equal(Heavy);
+        });
+
+        it("should reject submission with wrong model type", async function () {
+            await contract.startNewRound();
+
+            // hospitalA is Strong, assigned Heavy. Submitting Light should fail.
+            await expect(
+                contract.connect(hospitalA).submitUpdate(modelHash, 9500, 300, Light)
+            ).to.be.revertedWith("Wrong model type for capacity class");
+
+            // hospitalB is Medium, assigned MediumModel. Submitting Heavy should fail.
+            await expect(
+                contract.connect(hospitalB).submitUpdate(modelHash, 9500, 300, Heavy)
+            ).to.be.revertedWith("Wrong model type for capacity class");
         });
 
         it("should update hospital reliability metrics after submission", async function () {
             await contract.startNewRound();
-            await contract.connect(hospitalA).submitUpdate(modelHash, 8800, 200);
+            await contract.connect(hospitalA).submitUpdate(modelHash, 8800, 200, Heavy);
 
             const info = await contract.getHospitalInfo(hospitalA.address);
             expect(info.confidence).to.equal(8800);
@@ -185,13 +238,13 @@ describe("FLCoordinator", function () {
         it("should increment roundsParticipated after each submission", async function () {
             // Round 1
             await contract.startNewRound();
-            await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 300);
+            await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 300, Heavy);
             expect((await contract.getHospitalInfo(hospitalA.address)).roundsParticipated)
                 .to.equal(1);
 
             // Round 2
             await contract.startNewRound();
-            await contract.connect(hospitalA).submitUpdate(modelHash, 9100, 250);
+            await contract.connect(hospitalA).submitUpdate(modelHash, 9100, 250, Heavy);
             expect((await contract.getHospitalInfo(hospitalA.address)).roundsParticipated)
                 .to.equal(2);
 
@@ -203,45 +256,120 @@ describe("FLCoordinator", function () {
         it("should reject submission from unregistered address", async function () {
             await contract.startNewRound();
             await expect(
-                contract.connect(nonOwner).submitUpdate(modelHash, 9000, 500)
+                contract.connect(nonOwner).submitUpdate(modelHash, 9000, 500, Light)
             ).to.be.revertedWith("Not a registered hospital");
         });
 
         it("should reject submission before any round starts", async function () {
             await expect(
-                contract.connect(hospitalA).submitUpdate(modelHash, 9000, 500)
+                contract.connect(hospitalA).submitUpdate(modelHash, 9000, 500, Heavy)
             ).to.be.revertedWith("No active round");
         });
 
         it("should reject duplicate submission in the same round", async function () {
             await contract.startNewRound();
-            await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 500);
+            await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 500, Heavy);
 
             await expect(
-                contract.connect(hospitalA).submitUpdate(modelHash, 9200, 400)
+                contract.connect(hospitalA).submitUpdate(modelHash, 9200, 400, Heavy)
             ).to.be.revertedWith("Already submitted this round");
         });
 
         it("should reject confidence > SCALE", async function () {
             await contract.startNewRound();
             await expect(
-                contract.connect(hospitalA).submitUpdate(modelHash, 10_001, 500)
+                contract.connect(hospitalA).submitUpdate(modelHash, 10_001, 500, Heavy)
             ).to.be.revertedWith("Confidence out of range");
         });
 
         it("should reject ECE > SCALE", async function () {
             await contract.startNewRound();
             await expect(
-                contract.connect(hospitalA).submitUpdate(modelHash, 9000, 10_001)
+                contract.connect(hospitalA).submitUpdate(modelHash, 9000, 10_001, Heavy)
             ).to.be.revertedWith("ECE out of range");
         });
 
         it("should track round submitter count", async function () {
             await contract.startNewRound();
-            await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 300);
-            await contract.connect(hospitalB).submitUpdate(modelHash, 8500, 400);
+            await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 300, Heavy);
+            await contract.connect(hospitalB).submitUpdate(modelHash, 8500, 400, MediumModel);
 
             expect(await contract.getRoundSubmitterCount(1)).to.equal(2);
+        });
+    });
+
+    // =========================================================================
+    //  Ensemble Prediction Recording
+    // =========================================================================
+    describe("Ensemble Prediction Recording", function () {
+        const modelHash = ethers.keccak256(ethers.toUtf8Bytes("model-v1"));
+        const predHash = ethers.keccak256(ethers.toUtf8Bytes("ensemble-pred-r1"));
+
+        beforeEach(async function () {
+            await contract.registerHospital(hospitalA.address, "A", Strong, benchmarkHash, await sigFor(hospitalA, benchmarkHash));
+            await contract.registerHospital(hospitalB.address, "B", Medium, benchmarkHash, await sigFor(hospitalB, benchmarkHash));
+            await contract.startNewRound();
+            await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 300, Heavy);
+            await contract.connect(hospitalB).submitUpdate(modelHash, 8500, 400, MediumModel);
+        });
+
+        it("should record an ensemble prediction", async function () {
+            await expect(
+                contract.recordEnsemblePrediction(predHash, 2)
+            )
+                .to.emit(contract, "EnsemblePredictionRecorded")
+                .withArgs(1, predHash, 2);
+
+            const record = await contract.getEnsembleRecord(1);
+            expect(record.predictionHash).to.equal(predHash);
+            expect(record.participantCount).to.equal(2);
+            expect(record.timestamp).to.be.gt(0);
+        });
+
+        it("should reject duplicate ensemble recording in same round", async function () {
+            await contract.recordEnsemblePrediction(predHash, 2);
+            await expect(
+                contract.recordEnsemblePrediction(predHash, 2)
+            ).to.be.revertedWith("Ensemble already recorded for this round");
+        });
+
+        it("should reject ensemble recording with 0 participants", async function () {
+            await expect(
+                contract.recordEnsemblePrediction(predHash, 0)
+            ).to.be.revertedWith("No participants");
+        });
+
+        it("should reject ensemble recording from non-owner", async function () {
+            await expect(
+                contract.connect(hospitalA).recordEnsemblePrediction(predHash, 2)
+            ).to.be.revertedWith("Not the contract owner");
+        });
+
+        it("should reject ensemble recording before any round", async function () {
+            const Factory = await ethers.getContractFactory("FLCoordinator");
+            const fresh = await Factory.deploy();
+            await fresh.waitForDeployment();
+            await expect(
+                fresh.recordEnsemblePrediction(predHash, 1)
+            ).to.be.revertedWith("No active round");
+        });
+
+        it("should allow separate recordings per round", async function () {
+            await contract.recordEnsemblePrediction(predHash, 2);
+
+            // Start round 2
+            await contract.startNewRound();
+            await contract.connect(hospitalA).submitUpdate(modelHash, 9200, 250, Heavy);
+
+            const predHash2 = ethers.keccak256(ethers.toUtf8Bytes("ensemble-pred-r2"));
+            await contract.recordEnsemblePrediction(predHash2, 1);
+
+            const r1 = await contract.getEnsembleRecord(1);
+            const r2 = await contract.getEnsembleRecord(2);
+            expect(r1.predictionHash).to.equal(predHash);
+            expect(r2.predictionHash).to.equal(predHash2);
+            expect(r1.participantCount).to.equal(2);
+            expect(r2.participantCount).to.equal(1);
         });
     });
 
@@ -254,7 +382,6 @@ describe("FLCoordinator", function () {
         describe("calculateWeightPure (no participation bonus)", function () {
 
             it("Strong / conf=95% / ece=5% / 0 rounds -> 10830", async function () {
-                // 12000 * 9500 * 9500 / 10000^2 = 10830
                 const w = await contract.calculateWeightPure(Strong, 9500, 500, 0);
                 expect(w).to.equal(expectedWeight(CAP_STRONG, 9500n, 500n, 0n));
                 expect(w).to.equal(10_830n);
@@ -267,14 +394,12 @@ describe("FLCoordinator", function () {
             });
 
             it("Weak / conf=80% / ece=20% / 0 rounds -> 5120", async function () {
-                // 8000 * 8000 * 8000 / 10000^2 = 5120
                 const w = await contract.calculateWeightPure(Weak, 8000, 2000, 0);
                 expect(w).to.equal(expectedWeight(CAP_WEAK, 8000n, 2000n, 0n));
                 expect(w).to.equal(5_120n);
             });
 
             it("Strong / conf=100% / ece=0% / 0 rounds -> 12000", async function () {
-                // 12000 * 10000 * 10000 / 10000^2 = 12000
                 const w = await contract.calculateWeightPure(Strong, 10000, 0, 0);
                 expect(w).to.equal(12_000n);
             });
@@ -318,26 +443,22 @@ describe("FLCoordinator", function () {
             it("Participation bonus caps at 2500 (5 rounds)", async function () {
                 const w5 = await contract.calculateWeightPure(Medium, 9000, 1000, 5);
                 const w10 = await contract.calculateWeightPure(Medium, 9000, 1000, 10);
-                // Both should have max bonus of 2500
                 expect(w5).to.equal(8_100n + 2_500n);
                 expect(w10).to.equal(8_100n + 2_500n);
-                expect(w5).to.equal(w10); // No difference beyond cap
+                expect(w5).to.equal(w10);
             });
 
             it("Participation bonus cannot push weight above MAX_WEIGHT", async function () {
-                // Strong / conf=100% / ece=0% = 12000 base + 2500 bonus = 14500 < 15000
                 const w = await contract.calculateWeightPure(Strong, 10000, 0, 5);
                 expect(w).to.equal(12_000n + 2_500n);
             });
 
             it("Bonus helps low-capacity nodes", async function () {
-                // Weak / conf=100% / ece=0% = 8000 base + 2500 bonus = 10500
                 const w = await contract.calculateWeightPure(Weak, 10000, 0, 5);
                 expect(w).to.equal(8_000n + 2_500n);
             });
 
             it("Zero metrics + participation = only bonus", async function () {
-                // conf=0 -> baseWeight=0, bonus=500*2=1000
                 const w = await contract.calculateWeightPure(Strong, 0, 0, 2);
                 expect(w).to.equal(1_000n);
             });
@@ -362,7 +483,7 @@ describe("FLCoordinator", function () {
                 await contract.startNewRound();
                 await contract
                     .connect(hospitalA)
-                    .submitUpdate(modelHash, 9500, 500); // Strong, 95%, 5%, 1 round
+                    .submitUpdate(modelHash, 9500, 500, Heavy); // Strong, 95%, 5%, 1 round
 
                 const w = await contract.calculateWeight(hospitalA.address);
                 // 10830 base + 500 bonus = 11330
@@ -372,12 +493,12 @@ describe("FLCoordinator", function () {
             it("should increase weight across multiple rounds", async function () {
                 // Round 1
                 await contract.startNewRound();
-                await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 1000);
+                await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 1000, Heavy);
                 const w1 = await contract.calculateWeight(hospitalA.address);
 
                 // Round 2 (same metrics)
                 await contract.startNewRound();
-                await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 1000);
+                await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 1000, Heavy);
                 const w2 = await contract.calculateWeight(hospitalA.address);
 
                 // w2 should be 500 more than w1 (one extra round)
@@ -387,10 +508,10 @@ describe("FLCoordinator", function () {
             it("should reflect per-hospital capacity class in the weight", async function () {
                 await contract.startNewRound();
 
-                // All submit identical reliability metrics
-                await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 1000);
-                await contract.connect(hospitalB).submitUpdate(modelHash, 9000, 1000);
-                await contract.connect(hospitalC).submitUpdate(modelHash, 9000, 1000);
+                // All submit identical reliability metrics, each with correct model type
+                await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 1000, Heavy);
+                await contract.connect(hospitalB).submitUpdate(modelHash, 9000, 1000, MediumModel);
+                await contract.connect(hospitalC).submitUpdate(modelHash, 9000, 1000, Light);
 
                 const wA = await contract.calculateWeight(hospitalA.address); // Strong
                 const wB = await contract.calculateWeight(hospitalB.address); // Medium
@@ -416,5 +537,3 @@ describe("FLCoordinator", function () {
         });
     });
 });
-
-
