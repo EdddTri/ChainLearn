@@ -129,7 +129,7 @@ federated-learning/
 
 **`simulation/run_simulation.py`** -- End-to-end simulation that automatically starts a Hardhat node, deploys the contract, registers 3 hospitals with signed PoC, runs multi-round training, reads on-chain weights, computes weighted ensemble prediction, and records the ensemble hash on-chain.
 
-**`simulation/experiment.py`** -- Comprehensive experiment framework supporting multiple datasets, non-IID severity levels, random seeds, baseline comparisons, and ablation studies. Outputs formatted tables and CSV results.
+**`simulation/experiment.py`** -- Comprehensive experiment framework supporting multiple datasets, non-IID severity levels, random seeds, baseline comparisons, ablation studies, adversarial experiments, and cost analysis. Outputs formatted tables and CSV results.
 
 ## Smart Contract: FLCoordinator
 
@@ -171,8 +171,27 @@ Written in Solidity 0.8.24, deployed on a local Hardhat network.
 | **Local-Best** | Best single-hospital model by accuracy |
 | **Local-Weak/Medium/Strong** | Individual hospital models |
 | **FedAvg** | All hospitals train ResNet-50, average parameters |
+| **FedProx** | FedAvg + proximal regularization term `(mu/2) * \|\|w - w_global\|\|^2` |
+| **FedMD** | Heterogeneous knowledge distillation via public dataset consensus logits |
 | **EqualWt-Ens** | 3 capacity-assigned models, uniform weights (1/3 each) |
 | **Ours** | 3 capacity-assigned models, on-chain capacity-aware weights |
+
+### FedProx Baseline
+
+FedProx extends FedAvg by adding a proximal term to each hospital's local objective, penalizing deviation from the global model. This helps stabilize training under non-IID data. All hospitals train ResNet-50 (homogeneous), with `mu = 0.01`:
+
+```
+loss = CrossEntropy(pred, label) + (mu / 2) * ||w_local - w_global||^2
+```
+
+### FedMD Baseline
+
+FedMD (Federated Model Distillation) supports heterogeneous architectures like our method. It works by:
+1. Splitting 10% of training data as a shared public dataset.
+2. Each hospital trains its capacity-assigned model on its private shard.
+3. All models compute logits on the public dataset; these are averaged into consensus logits.
+4. Each model distills the consensus via KL divergence on the public set (temperature = 3.0).
+5. Final prediction is an equal-weight ensemble of the distilled models.
 
 ### Ablation Studies
 
@@ -183,6 +202,44 @@ Written in Solidity 0.8.24, deployed on a local Hardhat network.
 | No ECE | ECE set to 0 for all |
 | No Bonus | Participation bonus disabled |
 | No PoC | All hospitals train EfficientNet-B0, uniform capacity multiplier |
+
+### Adversarial Experiments
+
+Three attack scenarios test the robustness of the on-chain coordination:
+
+| Scenario | Description | Expected Outcome |
+|---|---|---|
+| **Lazy Hospital** | One hospital submits a random (untrained) model with honest metrics | On-chain weights naturally downweight it due to low confidence and high ECE |
+| **Inflated Metrics** | One hospital submits a bad model but lies about confidence (max) and ECE (zero) | Ensemble accuracy degrades -- motivates need for metric verification |
+| **Capacity Spoofing** | A weak hospital claims strong capacity to get a heavier model | Without PoC: mismatch hurts ensemble. With PoC: contract rejects the registration via signature verification |
+
+### Communication Cost Analysis
+
+Per-round communication cost comparison across methods:
+
+| Method | What is Sent | Per-Hospital Cost | Total (3 hospitals) |
+|---|---|---|---|
+| **FedAvg** | Full ResNet-50 parameters (23.5M params) | ~94 MB | ~282 MB |
+| **FedProx** | Full ResNet-50 parameters (same as FedAvg) | ~94 MB | ~282 MB |
+| **FedMD** | Logits on public dataset (~1300 samples) | ~4 KB | ~12 KB |
+| **Ours** | model_hash + confidence + ECE + modelType (4 values) | ~224 B | ~672 B |
+
+Our method achieves the lowest communication overhead by transmitting only a hash and scalar metrics, with the ensemble computed from locally-stored models.
+
+### Gas Cost Analysis
+
+Estimated gas costs for on-chain operations:
+
+| Operation | Gas Cost | USD (at 30 Gwei, ETH=$2000) |
+|---|---|---|
+| `registerHospital()` | ~150,000 | ~$0.009 |
+| `startNewRound()` | ~45,000 | ~$0.003 |
+| `submitUpdate()` | ~95,000 | ~$0.006 |
+| `calculateWeight()` (view) | 0 (free) | $0.000 |
+| `recordEnsemblePrediction()` | ~65,000 | ~$0.004 |
+| **Total per round (3 hospitals)** | **~395,000** | **~$0.024** |
+
+The on-chain overhead is negligible, making the system practical for real deployment.
 
 ### Datasets
 
@@ -283,6 +340,8 @@ python simulation/experiment.py --seeds 3 --epochs 5
 3. **Weight cap at 15,000** -- Prevents any single hospital from dominating the ensemble (max 1.5x multiplier).
 4. **EIP-191 signatures** -- PoC benchmark results are signed by the hospital's private key and verified on-chain, preventing spoofed capacity claims.
 5. **Model type enforcement** -- The contract rejects submissions where the model type doesn't match the hospital's assigned architecture, ensuring the capacity-aware design is respected.
+6. **Minimal communication** -- Only hashes and scalar metrics are sent on-chain (~224 bytes per hospital per round), compared to ~94 MB for FedAvg parameter sharing.
+7. **Adversarial robustness** -- The weight formula naturally penalizes low-quality models, and PoC signature verification prevents capacity spoofing.
 
 ## License
 
