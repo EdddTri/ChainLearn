@@ -32,12 +32,10 @@ from torch.utils.data import DataLoader, TensorDataset, Subset
 import torchvision.models as models
 import torchvision.transforms as transforms
 
-import medmnist
 from medmnist import PneumoniaMNIST
 
 # Allow imports from hospital_node
 sys.path.insert(0, os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")), "hospital_node"))
-from capacity_manager import compute_ece
 
 # ── Config ─────────────────────────────────────────────────────────────────
 NUM_CLASSES   = 2         # PneumoniaMNIST: Normal (0), Pneumonia (1)

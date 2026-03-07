@@ -10,7 +10,18 @@ Prerequisites:
 import os
 import sys
 
+from dotenv import load_dotenv
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+load_dotenv()
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
 
 
 def test_registration_and_submission():
@@ -36,8 +47,8 @@ def test_registration_and_submission():
         print(f"ABI not found at {abi_path}. Run `npx hardhat compile` first.")
         return
 
-    owner_key = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-    hospital_key = "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+    owner_key = _require_env("FL_OWNER_PRIVATE_KEY")
+    hospital_key = _require_env("FL_HOSPITAL1_PRIVATE_KEY")
 
     owner = BlockchainClient(
         provider_url="http://127.0.0.1:8545",

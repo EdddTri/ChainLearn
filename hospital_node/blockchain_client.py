@@ -4,8 +4,20 @@ blockchain_client.py -- Web3 interface for FLCoordinator
 """
 
 import json
+import os
+
+from dotenv import load_dotenv
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
+
+load_dotenv()
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
 
 
 class BlockchainClient:
@@ -33,12 +45,8 @@ class BlockchainClient:
             abi=abi,
         )
 
-        if private_key:
-            self.account = self.w3.eth.account.from_key(private_key)
-        else:
-            self.account = self.w3.eth.account.from_key(
-                "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-            )
+        key = private_key or _require_env("FL_PRIVATE_KEY")
+        self.account = self.w3.eth.account.from_key(key)
         self.address = self.account.address
 
     def _send_tx(self, fn):

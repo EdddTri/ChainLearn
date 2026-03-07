@@ -11,21 +11,17 @@ import os
 import sys
 from typing import Dict, List
 
+from dotenv import load_dotenv
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 
 sys.path.insert(0, os.path.dirname(__file__))
 from capacity_manager import mock_training_manager
 
+load_dotenv()
+
 SCALE = 10_000
 CAPACITY_CLASS_MAP = {"Weak": 0, "Medium": 1, "Strong": 2}
-
-HARDHAT_ACCOUNTS = [
-    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-    "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-    "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
-    "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
-]
 
 DEFAULT_ABI_PATH = os.path.join(
     os.path.dirname(__file__),
@@ -38,6 +34,22 @@ DEFAULT_ABI_PATH = os.path.join(
 )
 
 
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
+
+
+def _load_demo_accounts() -> List[str]:
+    return [
+        _require_env("FL_OWNER_PRIVATE_KEY"),
+        _require_env("FL_HOSPITAL1_PRIVATE_KEY"),
+        _require_env("FL_HOSPITAL2_PRIVATE_KEY"),
+        _require_env("FL_HOSPITAL3_PRIVATE_KEY"),
+    ]
+
+
 class FLCoordinatorClient:
     """High-level Python client for the FLCoordinator contract."""
 
@@ -46,7 +58,7 @@ class FLCoordinatorClient:
         provider_url: str = "http://127.0.0.1:8545",
         contract_address: str = "",
         abi_path: str = DEFAULT_ABI_PATH,
-        private_key: str = HARDHAT_ACCOUNTS[0],
+        private_key: str | None = None,
     ):
         self.w3 = Web3(Web3.HTTPProvider(provider_url))
         self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
@@ -63,10 +75,16 @@ class FLCoordinatorClient:
             abi=abi,
         )
 
-        self.account = self.w3.eth.account.from_key(private_key)
-        self.address = self.account.address
+        self.account = None
+        self.address = None
+        if private_key:
+            self.account = self.w3.eth.account.from_key(private_key)
+            self.address = self.account.address
 
     def _send_tx(self, fn) -> dict:
+        if self.account is None or self.address is None:
+            raise ValueError("A private key is required for transactions")
+
         tx = fn.build_transaction(
             {
                 "from": self.address,
@@ -153,9 +171,11 @@ class FLCoordinatorClient:
 
 
 def run_full_demo(contract_address: str, rounds: int = 3):
+    accounts = _load_demo_accounts()
+
     owner_client = FLCoordinatorClient(
         contract_address=contract_address,
-        private_key=HARDHAT_ACCOUNTS[0],
+        private_key=accounts[0],
     )
 
     hospital_names = ["City General", "St. Marys", "University Med"]
@@ -163,16 +183,17 @@ def run_full_demo(contract_address: str, rounds: int = 3):
     print("Phase 1: PoC + registration")
     registration = []
     for i, name in enumerate(hospital_names):
+        node_key = accounts[i + 1]
         poc = mock_training_manager(
             device="cpu",
             hospital_id=i,
             num_hospitals=3,
             run_poc=True,
-            private_key=HARDHAT_ACCOUNTS[i + 1],
+            private_key=node_key,
             epochs=1,
             max_samples=256,
         )
-        hospital_account = Web3().eth.account.from_key(HARDHAT_ACCOUNTS[i + 1])
+        hospital_account = Web3().eth.account.from_key(node_key)
         owner_client.register_hospital(
             hospital_address=hospital_account.address,
             name=name,
@@ -184,7 +205,7 @@ def run_full_demo(contract_address: str, rounds: int = 3):
             {
                 "name": name,
                 "capacity_class": poc["capacity_class"],
-                "key": HARDHAT_ACCOUNTS[i + 1],
+                "key": node_key,
             }
         )
         print(
@@ -192,7 +213,7 @@ def run_full_demo(contract_address: str, rounds: int = 3):
         )
 
     print("\nPhase 2: multi-round submissions")
-    for r in range(1, rounds + 1):
+    for _ in range(1, rounds + 1):
         started_round = owner_client.start_round()
         print(f"\nRound {started_round}")
 

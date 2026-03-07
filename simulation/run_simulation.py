@@ -18,6 +18,7 @@ import sys
 import time
 from typing import List
 
+from dotenv import load_dotenv
 import torch
 import torch.nn.functional as F
 from web3 import Web3
@@ -36,12 +37,24 @@ ABI_PATH = os.path.join(
 sys.path.insert(0, os.path.join(ROOT_DIR, "hospital_node"))
 from capacity_manager import mock_training_manager
 
-ACCOUNTS = [
-    "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-    "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
-    "0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a",
-    "0x7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6",
-]
+load_dotenv()
+
+
+def _require_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise ValueError(f"Missing required environment variable: {name}")
+    return value
+
+
+def _load_accounts() -> List[str]:
+    return [
+        _require_env("FL_OWNER_PRIVATE_KEY"),
+        _require_env("FL_HOSPITAL1_PRIVATE_KEY"),
+        _require_env("FL_HOSPITAL2_PRIVATE_KEY"),
+        _require_env("FL_HOSPITAL3_PRIVATE_KEY"),
+    ]
+
 
 CAPACITY_ENUM = {"Weak": 0, "Medium": 1, "Strong": 2}
 SCALE = 10_000
@@ -106,7 +119,7 @@ def start_hardhat() -> subprocess.Popen:
     raise RuntimeError("Hardhat node failed to start")
 
 
-def deploy_contract() -> str:
+def deploy_contract(owner_private_key: str) -> str:
     print("[2/6] Deploying FLCoordinator...")
     w3 = Web3(Web3.HTTPProvider(PROVIDER))
     w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
@@ -114,7 +127,7 @@ def deploy_contract() -> str:
     with open(ABI_PATH, "r", encoding="utf-8") as f:
         artifact = json.load(f)
 
-    acct = w3.eth.account.from_key(ACCOUNTS[0])
+    acct = w3.eth.account.from_key(owner_private_key)
     contract = w3.eth.contract(abi=artifact["abi"], bytecode=artifact["bytecode"])
 
     tx = contract.constructor().build_transaction(
@@ -144,15 +157,19 @@ def weighted_ensemble_predict(models_list, weights: List[float], x: torch.Tensor
 
 
 def main(rounds: int):
+    accounts = _load_accounts()
+    owner_key = accounts[0]
+    hospital_keys = accounts[1:4]
+
     hardhat_proc = None
     try:
         hardhat_proc = start_hardhat()
-        contract_addr = deploy_contract()
-        owner = ContractHelper(contract_addr, ACCOUNTS[0])
+        contract_addr = deploy_contract(owner_key)
+        owner = ContractHelper(contract_addr, owner_key)
 
         print("[3/6] Registering hospitals with signed PoC...")
         profiles = []
-        for i, key in enumerate(ACCOUNTS[1:4]):
+        for i, key in enumerate(hospital_keys):
             name = f"Hospital-{chr(ord('A') + i)}"
             reg = mock_training_manager(
                 device="cpu",
@@ -188,7 +205,7 @@ def main(rounds: int):
         last_weights = None
 
         print("[4/6] Running multi-round training...")
-        for r in range(1, rounds + 1):
+        for _ in range(1, rounds + 1):
             owner._tx(owner.contract.functions.startNewRound())
             current_round = owner.contract.functions.currentRound().call()
             print(f"\n       Round {current_round}")

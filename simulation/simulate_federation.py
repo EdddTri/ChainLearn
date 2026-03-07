@@ -1,5 +1,5 @@
 """
-simulate_federation.py — End-to-end local simulation
+simulate_federation.py -- End-to-end local simulation
 ======================================================
 Simulates a full federated learning workflow locally:
 
@@ -14,17 +14,17 @@ Usage:
 
 import argparse
 import copy
-import sys
 import os
+import sys
 
 # Allow importing from sibling packages
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import torch
+from hospital_node.aggregator import federated_average
+from hospital_node.data_loader import get_data_loaders
 from hospital_node.model import FederatedCNN, get_model_hash
 from hospital_node.trainer import run_training
-from hospital_node.data_loader import get_data_loaders
-from hospital_node.aggregator import federated_average
 
 
 def simulate(num_nodes: int, num_rounds: int, epochs_per_round: int):
@@ -39,7 +39,7 @@ def simulate(num_nodes: int, num_rounds: int, epochs_per_round: int):
     # Initialize global model
     global_model = FederatedCNN(num_classes=10)
 
-    # Create data partitions — each node gets a different random seed
+    # Create data partitions; each node gets a different random seed
     node_loaders = []
     for i in range(num_nodes):
         train_loader, val_loader = get_data_loaders(
@@ -50,17 +50,16 @@ def simulate(num_nodes: int, num_rounds: int, epochs_per_round: int):
         )
         node_loaders.append((train_loader, val_loader))
 
-    # ── Federated rounds ────────────────────────────────────────────────
     for round_num in range(1, num_rounds + 1):
-        print(f"\n{'─' * 60}")
+        print(f"\n{'-' * 60}")
         print(f"  ROUND {round_num}/{num_rounds}")
-        print(f"{'─' * 60}")
+        print(f"{'-' * 60}")
 
         local_state_dicts = []
         data_sizes = []
 
         for node_id in range(num_nodes):
-            print(f"\n  🏥 Hospital Node {node_id + 1}")
+            print(f"\n  Hospital Node {node_id + 1}")
 
             # Each node starts from the current global model
             local_model = copy.deepcopy(global_model)
@@ -81,21 +80,20 @@ def simulate(num_nodes: int, num_rounds: int, epochs_per_round: int):
             data_sizes.append(len(train_loader.dataset))
 
             model_hash = get_model_hash(local_model)
-            print(f"    Model hash: {model_hash[:24]}…")
+            print(f"    Model hash: {model_hash[:24]}...")
 
-        # ── Aggregation ────────────────────────────────────────────────
-        print(f"\n  ⚙ Aggregating {len(local_state_dicts)} model updates (FedAvg)...")
+        print(f"\n  Aggregating {len(local_state_dicts)} model updates (FedAvg)...")
         global_model = federated_average(
             global_model=global_model,
             local_state_dicts=local_state_dicts,
             weights=[float(s) for s in data_sizes],
         )
         global_hash = get_model_hash(global_model)
-        print(f"  ✓ New global model hash: {global_hash[:24]}…")
+        print(f"  New global model hash: {global_hash[:24]}...")
 
     print(f"\n{'=' * 60}")
     print("Simulation complete!")
-    print(f"Final global model hash: {get_model_hash(global_model)[:32]}…")
+    print(f"Final global model hash: {get_model_hash(global_model)[:32]}...")
 
 
 if __name__ == "__main__":
@@ -110,6 +108,3 @@ if __name__ == "__main__":
         num_rounds=args.rounds,
         epochs_per_round=args.epochs,
     )
-
-
-
