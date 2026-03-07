@@ -3,13 +3,26 @@ pragma solidity ^0.8.24;
 
 /**
  * @title FLCoordinator
- * @notice Coordinates decentralized federated learning across hospital nodes.
- * @dev Assigns capacity classes, stores per-round model hashes and reliability
- *      metrics, and exposes a deterministic on-chain weight function that
- *      incorporates capacity, reliability, AND participation history.
+ * @notice Coordinates federated ensemble learning across hospital nodes.
+ * @dev
+ *   Proof-of-Capacity (PoC) benchmark fingerprints are verified on registration
+ *   to assign each hospital a capacity class (Weak / Medium / Strong).
+ *   That class deterministically maps to one of three model types:
+ *     Weak   -> Light   (e.g. MobileNet)
+ *     Medium -> Medium  (e.g. EfficientNet-B0)
+ *     Strong -> Heavy   (e.g. ResNet-50)
  *
- *      All percentages use fixed-point integer math with SCALE = 10 000
- *      (i.e. 10 000 = 100%).  This eliminates floating-point entirely.
+ *   After local training each hospital submits a hash of its model weights
+ *   together with reliability metrics (confidence, ECE) and the model type it
+ *   trained.  The contract validates that the submitted model type matches the
+ *   hospital's assigned capacity class.
+ *
+ *   Weights for ensemble aggregation are computed on-chain using capacity,
+ *   reliability, and participation history.  The final ensemble prediction
+ *   hash is recorded on-chain for auditability.
+ *
+ *   All percentages use fixed-point integer math with SCALE = 10 000
+ *   (i.e. 10 000 = 100%).
  */
 contract FLCoordinator {
     // -- Constants ------------------------------------------------------------
@@ -27,6 +40,9 @@ contract FLCoordinator {
     // -- Types ----------------------------------------------------------------
     enum CapacityClass { Weak, Medium, Strong }
 
+    /// @notice Model architectures assigned by capacity class.
+    enum ModelType { Light, Medium, Heavy }
+
     struct Hospital {
         address       addr;
         string        name;
@@ -42,9 +58,16 @@ contract FLCoordinator {
     }
 
     struct Submission {
-        bytes32 modelHash;
-        uint256 confidence;
-        uint256 ece;
+        bytes32   modelHash;
+        uint256   confidence;
+        uint256   ece;
+        uint256   timestamp;
+        ModelType modelType;
+    }
+
+    struct EnsembleRecord {
+        bytes32 predictionHash;
+        uint256 participantCount;
         uint256 timestamp;
     }
 
@@ -59,6 +82,8 @@ contract FLCoordinator {
     mapping(uint256 => mapping(address => Submission)) public roundSubmissions;
     // round => list of submitters (for enumeration)
     mapping(uint256 => address[]) public roundSubmitters;
+    // round => ensemble record
+    mapping(uint256 => EnsembleRecord) public ensembleRecords;
 
     // -- Events ---------------------------------------------------------------
     event HospitalRegistered(
@@ -69,11 +94,17 @@ contract FLCoordinator {
     );
     event RoundStarted(uint256 indexed round);
     event UpdateSubmitted(
+        uint256   indexed round,
+        address   indexed hospital,
+        bytes32   modelHash,
+        uint256   confidence,
+        uint256   ece,
+        ModelType modelType
+    );
+    event EnsemblePredictionRecorded(
         uint256 indexed round,
-        address indexed hospital,
-        bytes32 modelHash,
-        uint256 confidence,
-        uint256 ece
+        bytes32 predictionHash,
+        uint256 participantCount
     );
 
     // -- Modifiers ------------------------------------------------------------
@@ -124,6 +155,19 @@ contract FLCoordinator {
         require(v == 27 || v == 28, "Invalid signature v");
 
         return ecrecover(_ethSignedHash, v, r, s);
+    }
+
+    // -- Model-type assignment ------------------------------------------------
+    /**
+     * @notice Return the model type assigned to a given capacity class.
+     *         Weak -> Light, Medium -> Medium, Strong -> Heavy.
+     */
+    function getModelType(
+        CapacityClass _class
+    ) public pure returns (ModelType) {
+        if (_class == CapacityClass.Weak)   return ModelType.Light;
+        if (_class == CapacityClass.Medium) return ModelType.Medium;
+        return ModelType.Heavy;
     }
 
     // -- Hospital Registration ------------------------------------------------
@@ -183,11 +227,14 @@ contract FLCoordinator {
      * @param _modelHash   Cryptographic hash (SHA-256 / IPFS CID) of model weights.
      * @param _confidence  Self-reported confidence in [0, SCALE].
      * @param _ece         Self-reported Expected Calibration Error in [0, SCALE].
+     * @param _modelType   Model architecture used -- must match the hospital's
+     *                     capacity-assigned type (Light / Medium / Heavy).
      */
     function submitUpdate(
         bytes32 _modelHash,
         uint256 _confidence,
-        uint256 _ece
+        uint256 _ece,
+        ModelType _modelType
     ) external onlyRegistered {
         require(currentRound > 0, "No active round");
         require(_confidence <= SCALE, "Confidence out of range");
@@ -197,12 +244,17 @@ contract FLCoordinator {
             "Already submitted this round"
         );
 
+        // Enforce that the hospital trained the model assigned to its capacity
+        ModelType assigned = getModelType(hospitals[msg.sender].capacityClass);
+        require(_modelType == assigned, "Wrong model type for capacity class");
+
         // Store submission
         roundSubmissions[currentRound][msg.sender] = Submission({
             modelHash: _modelHash,
             confidence: _confidence,
             ece: _ece,
-            timestamp: block.timestamp
+            timestamp: block.timestamp,
+            modelType: _modelType
         });
         roundSubmitters[currentRound].push(msg.sender);
 
@@ -218,7 +270,39 @@ contract FLCoordinator {
             msg.sender,
             _modelHash,
             _confidence,
-            _ece
+            _ece,
+            _modelType
+        );
+    }
+
+    // -- Ensemble Prediction Recording ----------------------------------------
+    /**
+     * @notice Record the hash of the final ensemble prediction for a round.
+     * @dev    Called by the aggregator after computing the weighted ensemble.
+     * @param _predictionHash   SHA-256 / IPFS CID of the ensemble output.
+     * @param _participantCount Number of hospitals included in the ensemble.
+     */
+    function recordEnsemblePrediction(
+        bytes32 _predictionHash,
+        uint256 _participantCount
+    ) external onlyOwner {
+        require(currentRound > 0, "No active round");
+        require(
+            ensembleRecords[currentRound].timestamp == 0,
+            "Ensemble already recorded for this round"
+        );
+        require(_participantCount > 0, "No participants");
+
+        ensembleRecords[currentRound] = EnsembleRecord({
+            predictionHash: _predictionHash,
+            participantCount: _participantCount,
+            timestamp: block.timestamp
+        });
+
+        emit EnsemblePredictionRecorded(
+            currentRound,
+            _predictionHash,
+            _participantCount
         );
     }
 
@@ -314,6 +398,7 @@ contract FLCoordinator {
         returns (
             string memory name,
             CapacityClass capacityClass,
+            ModelType     assignedModelType,
             uint256 confidence,
             uint256 ece,
             bool isRegistered,
@@ -325,6 +410,7 @@ contract FLCoordinator {
         return (
             h.name,
             h.capacityClass,
+            getModelType(h.capacityClass),
             h.confidence,
             h.ece,
             h.isRegistered,
@@ -340,14 +426,15 @@ contract FLCoordinator {
         external
         view
         returns (
-            bytes32 modelHash,
-            uint256 confidence,
-            uint256 ece,
-            uint256 timestamp
+            bytes32   modelHash,
+            uint256   confidence,
+            uint256   ece,
+            uint256   timestamp,
+            ModelType modelType
         )
     {
         Submission storage s = roundSubmissions[_round][_hospital];
-        return (s.modelHash, s.confidence, s.ece, s.timestamp);
+        return (s.modelHash, s.confidence, s.ece, s.timestamp, s.modelType);
     }
 
     function getRoundSubmitterCount(
@@ -355,8 +442,19 @@ contract FLCoordinator {
     ) external view returns (uint256) {
         return roundSubmitters[_round].length;
     }
+
+    function getEnsembleRecord(
+        uint256 _round
+    )
+        external
+        view
+        returns (
+            bytes32 predictionHash,
+            uint256 participantCount,
+            uint256 timestamp
+        )
+    {
+        EnsembleRecord storage r = ensembleRecords[_round];
+        return (r.predictionHash, r.participantCount, r.timestamp);
+    }
 }
-
-
-
-
