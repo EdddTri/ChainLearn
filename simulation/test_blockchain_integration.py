@@ -81,7 +81,7 @@ def test_registration_and_submission():
 
     print("3. Submitting update...")
     model_hash = bytes.fromhex("11" * 32)
-    hospital.submit_update(model_hash, confidence=9000, ece=500)
+    hospital.submit_update(model_hash, confidence=9000, ece=500, model_type=1)  # Medium
 
     count = owner.get_hospital_count()
     weight = owner.calculate_weight(hospital.address)

@@ -83,7 +83,7 @@ class BlockchainClient:
     def start_new_round(self) -> dict:
         return self._send_tx(self.contract.functions.startNewRound())
 
-    def submit_update(self, model_hash: bytes, confidence: int, ece: int, model_type: int = 0) -> dict:
+    def submit_update(self, model_hash: bytes, confidence: int, ece: int, model_type: int) -> dict:
         return self._send_tx(
             self.contract.functions.submitUpdate(model_hash, confidence, ece, model_type)
         )

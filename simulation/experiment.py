@@ -952,8 +952,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
         evaluate_ensemble(spoof_models, eq_w, test_loader, num_classes)))
 
     # ── Store results ──────────────────────────────────────────────────
-    for method, metrics in results.items():
-        all_raw_results[(dataset_name, noniid_key, f"adv_{seed}")] = results
+    all_raw_results[(dataset_name, noniid_key, f"adv_{seed}")] = results
 
     # ── Print table ────────────────────────────────────────────────────
     print_adversarial_table(results, dataset_name, noniid_key,

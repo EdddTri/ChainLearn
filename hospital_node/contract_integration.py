@@ -128,8 +128,10 @@ class FLCoordinatorClient:
         model_bytes = self._hash_to_bytes32(poc_results["model_hash"])
         confidence = int(poc_results["confidence"])
         ece = int(poc_results["ece"])
+        capacity_to_model_type = {"Weak": 0, "Medium": 1, "Strong": 2}
+        model_type = capacity_to_model_type.get(poc_results.get("capacity_class", "Weak"), 0)
         return self._send_tx(
-            self.contract.functions.submitUpdate(model_bytes, confidence, ece)
+            self.contract.functions.submitUpdate(model_bytes, confidence, ece, model_type)
         )
 
     def get_all_weights(self, round_number: int) -> List[Dict]:
@@ -148,8 +150,8 @@ class FLCoordinatorClient:
                     "address": addr,
                     "name": info[0],
                     "capacity": capacity_labels.get(info[1], "Unknown"),
-                    "confidence": info[2],
-                    "ece": info[3],
+                    "confidence": info[3],
+                    "ece": info[4],
                     "weight": weight,
                 }
             )
