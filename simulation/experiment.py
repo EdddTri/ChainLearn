@@ -188,7 +188,7 @@ def train_model(model, dataloader, epochs=EPOCHS):
     for _ in range(epochs):
         for x, y in dataloader:
             x = x.to(DEVICE)
-            y = y.to(DEVICE).squeeze().long()
+            y = y.to(DEVICE).view(-1).long()
             opt.zero_grad()
             loss = crit(model(x), y)
             loss.backward()
@@ -207,7 +207,7 @@ def evaluate_model(model, dataloader):
     with torch.no_grad():
         for x, y in dataloader:
             x = x.to(DEVICE)
-            y = y.to(DEVICE).squeeze().long()
+            y = y.to(DEVICE).view(-1).long()
             probs = F.softmax(model(x), dim=1)
             confs, preds = probs.max(dim=1)
             all_preds.extend(preds.cpu().numpy())
@@ -235,7 +235,7 @@ def evaluate_ensemble(models_list, weights, dataloader, num_classes):
 
     for x, y in dataloader:
         x = x.to(DEVICE)
-        y = y.squeeze().long()
+        y = y.view(-1).long()
 
         ensemble_probs = torch.zeros(x.size(0), num_classes)
         for model, w in zip(models_list, normed):
@@ -340,7 +340,7 @@ def train_model_fedprox(model, dataloader, global_state_dict, mu=FEDPROX_MU, epo
     for _ in range(epochs):
         for x, y in dataloader:
             x = x.to(DEVICE)
-            y = y.to(DEVICE).squeeze().long()
+            y = y.to(DEVICE).view(-1).long()
             opt.zero_grad()
             loss = crit(model(x), y)
             # Proximal term
