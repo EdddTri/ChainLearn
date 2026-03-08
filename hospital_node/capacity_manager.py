@@ -202,10 +202,11 @@ def load_pneumonia_npz(npz_path: str | None = None) -> Tuple[torch.Tensor, torch
 
 def create_non_iid_splits(
     labels: torch.Tensor,
+    num_hospitals: int = 3,
     ratios: List[Dict[int, float]] | None = None,
     seed: int = 42,
 ) -> List[List[int]]:
-    """Create 3 hospital index shards with label skew."""
+    """Create hospital index shards with label skew."""
     if ratios is None:
         ratios = [
             {0: 0.2, 1: 0.8},
@@ -213,6 +214,7 @@ def create_non_iid_splits(
             {0: 0.8, 1: 0.2},
         ]
 
+    num_hospitals = len(ratios)
     rng = np.random.default_rng(seed)
     y = labels.cpu().numpy()
 
@@ -222,7 +224,7 @@ def create_non_iid_splits(
         rng.shuffle(idx)
         cls_indices[cls] = idx.tolist()
 
-    splits = [[] for _ in range(3)]
+    splits = [[] for _ in range(num_hospitals)]
     for cls in range(NUM_CLASSES):
         idx = cls_indices[cls]
         n = len(idx)
@@ -230,13 +232,13 @@ def create_non_iid_splits(
         if total_ratio == 0:
             continue
         start = 0
-        for h in range(3):
+        for h in range(num_hospitals):
             frac = ratios[h].get(cls, 0.0) / total_ratio
-            count = int(n * frac) if h < 2 else n - start
+            count = int(n * frac) if h < num_hospitals - 1 else n - start
             splits[h].extend(idx[start:start + count])
             start += count
 
-    for h in range(3):
+    for h in range(num_hospitals):
         rng.shuffle(splits[h])
 
     return splits
