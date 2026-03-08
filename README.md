@@ -338,10 +338,24 @@ python simulation/experiment.py --seeds 3 --epochs 5
 1. **Ensemble over FedAvg** -- Heterogeneous architectures cannot be parameter-averaged. Softmax ensemble preserves the strengths of each architecture.
 2. **Fixed-point arithmetic** -- Solidity lacks floating-point. All percentages use SCALE = 10,000 (100% = 10000).
 3. **Weight cap at 15,000** -- Prevents any single hospital from dominating the ensemble (max 1.5x multiplier).
-4. **EIP-191 signatures** -- PoC benchmark results are signed by the hospital's private key and verified on-chain, preventing spoofed capacity claims.
+4. **EIP-191 signatures** -- PoC benchmark results are signed by the hospital's private key and verified on-chain, ensuring benchmark identity (the contract confirms *who* signed, though not the truthfulness of the benchmark itself).
 5. **Model type enforcement** -- The contract rejects submissions where the model type doesn't match the hospital's assigned architecture, ensuring the capacity-aware design is respected.
 6. **Minimal communication** -- Only hashes and scalar metrics are sent on-chain (~224 bytes per hospital per round), compared to ~94 MB for FedAvg parameter sharing.
-7. **Adversarial robustness** -- The weight formula naturally penalizes low-quality models, and PoC signature verification prevents capacity spoofing.
+7. **Quality-aware weighting** -- The weight formula naturally downweights low-confidence or poorly calibrated models when metrics are reported honestly. This provides a passive defense but does not verify metric truthfulness; adversarial experiments quantify the impact of dishonest reporting.
+
+## Limitations
+
+1. **Metrics are self-reported** -- Confidence and ECE are submitted by each hospital with no verification. Our adversarial experiments quantify the impact of dishonest reporting.
+2. **No data poisoning defense** -- A hospital can train on corrupted data while reporting honest metrics. Backdoor attacks that perform well on clean evaluation data are not detected.
+3. **Benchmark replay** -- A hospital could run PoC on rented hardware, obtain a "Strong" signature, then train on weaker hardware. The signed hash is valid but may not reflect current capability.
+4. **Gas costs are estimates** -- The experiment pipeline uses an equivalent Python weight computation rather than actual on-chain execution.
+
+## Future Work
+
+1. Decentralized metric attestation (e.g., peer or committee-based validation with dispute resolution)
+2. Robust aggregation and poisoning defenses (Byzantine-resilient scoring/filtering)
+3. Periodic or challenge-based re-benchmarking to prevent stale capacity claims
+4. Full on-chain execution benchmarks on a live network for end-to-end gas validation
 
 ## License
 
