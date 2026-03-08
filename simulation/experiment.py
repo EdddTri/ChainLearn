@@ -760,15 +760,17 @@ def print_noniid_comparison(stats_by_level, dataset_name):
     print(f"  NON-IID SEVERITY COMPARISON | {dataset_name.upper()}")
     print(f"{'='*80}")
 
+    available_levels = {level: alpha for level, alpha in NON_IID_ALPHAS.items()
+                        if level in stats_by_level}
     header = f"  {'Method':<20}"
-    for level in NON_IID_ALPHAS:
-        header += f" {level+f' (a={NON_IID_ALPHAS[level]})':>22}"
+    for level in available_levels:
+        header += f" {level+f' (a={available_levels[level]})':>22}"
     print(header)
-    print(f"  {'-'*20}" + f" {'-'*22}" * len(NON_IID_ALPHAS))
+    print(f"  {'-'*20}" + f" {'-'*22}" * len(available_levels))
 
     for method in methods:
         row = f"  {method:<20}"
-        for level in NON_IID_ALPHAS:
+        for level in available_levels:
             if method in stats_by_level[level]:
                 s = stats_by_level[level][method]
                 row += f" {fmt(*s['acc']):>22}"
@@ -776,7 +778,7 @@ def print_noniid_comparison(stats_by_level, dataset_name):
                 row += f" {'N/A':>22}"
         print(row)
 
-    print(f"  {'-'*20}" + f" {'-'*22}" * len(NON_IID_ALPHAS))
+    print(f"  {'-'*20}" + f" {'-'*22}" * len(available_levels))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

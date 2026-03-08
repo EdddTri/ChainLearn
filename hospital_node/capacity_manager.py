@@ -208,13 +208,16 @@ def create_non_iid_splits(
 ) -> List[List[int]]:
     """Create hospital index shards with label skew."""
     if ratios is None:
-        ratios = [
-            {0: 0.2, 1: 0.8},
-            {0: 0.5, 1: 0.5},
-            {0: 0.8, 1: 0.2},
-        ]
-
-    num_hospitals = len(ratios)
+        if num_hospitals == 3:
+            ratios = [
+                {0: 0.2, 1: 0.8},
+                {0: 0.5, 1: 0.5},
+                {0: 0.8, 1: 0.2},
+            ]
+        else:
+            ratios = [{0: 1.0, 1: 1.0} for _ in range(num_hospitals)]
+    else:
+        num_hospitals = len(ratios)
     rng = np.random.default_rng(seed)
     y = labels.cpu().numpy()
 
@@ -301,8 +304,8 @@ def mock_training_manager(
     model = assign_model(capacity_class).to(device_t)
 
     x_all, y_all = load_pneumonia_npz()
-    splits = create_non_iid_splits(y_all)
-    shard = splits[hospital_id % num_hospitals]
+    splits = create_non_iid_splits(y_all, num_hospitals=num_hospitals)
+    shard = splits[hospital_id % len(splits)]
     if max_samples > 0:
         shard = shard[:max_samples]
 

@@ -37,7 +37,13 @@ def federated_average(
     if weights is None:
         weights = [1.0 / n] * n
     else:
+        if len(weights) != n:
+            raise ValueError(
+                f"weights length ({len(weights)}) != state_dicts length ({n})"
+            )
         total = sum(weights)
+        if total == 0:
+            raise ValueError("Sum of weights is zero, cannot aggregate")
         weights = [w / total for w in weights]
 
     # Start with zeros

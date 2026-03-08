@@ -281,6 +281,8 @@ def main(rounds: int):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="FLCoordinator simulation")
-    parser.add_argument("--rounds", type=int, default=3, help="Number of training rounds")
+    parser.add_argument("--rounds", type=int, default=3, help="Number of training rounds (>= 1)")
     args = parser.parse_args()
+    if args.rounds < 1:
+        parser.error("--rounds must be >= 1")
     main(rounds=args.rounds)

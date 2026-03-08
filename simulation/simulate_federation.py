@@ -37,7 +37,7 @@ def simulate(num_nodes: int, num_rounds: int, epochs_per_round: int):
     print("=" * 60)
 
     # Initialize global model
-    global_model = FederatedCNN(num_classes=10)
+    global_model = FederatedCNN(num_classes=2)
 
     # Create data partitions; each node gets a different random seed
     node_loaders = []
