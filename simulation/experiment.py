@@ -95,7 +95,13 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "results"
 #  Data Loading
 # ═══════════════════════════════════════════════════════════════════════════
 def load_dataset(name):
-    """Load a MedMNIST dataset. Returns (train_ds, test_ds, num_classes)."""
+    """Load a MedMNIST dataset. Returns (train_ds, val_ds, test_ds, num_classes).
+
+    The original test set is split 50/50 into a validation set (used for
+    computing reliability metrics / aggregation weights) and a held-out test
+    set (used only for final evaluation).  This eliminates the test-leakage
+    problem where metrics computed on test data would influence weighting.
+    """
     info = DATASET_REGISTRY[name]
     num_classes = info["num_classes"]
 
@@ -110,9 +116,18 @@ def load_dataset(name):
     os.makedirs(data_root, exist_ok=True)
 
     train_ds = info["cls"](split="train", download=True, transform=transform, root=data_root)
-    test_ds  = info["cls"](split="test",  download=True, transform=transform, root=data_root)
+    full_test_ds = info["cls"](split="test", download=True, transform=transform, root=data_root)
 
-    return train_ds, test_ds, num_classes
+    # Split test set into val (for reliability metrics) and test (for final eval)
+    n_total = len(full_test_ds)
+    n_val = n_total // 2
+    n_test = n_total - n_val
+    val_ds, test_ds = torch.utils.data.random_split(
+        full_test_ds, [n_val, n_test],
+        generator=torch.Generator().manual_seed(0),  # fixed seed for reproducibility
+    )
+
+    return train_ds, val_ds, test_ds, num_classes
 
 
 def _extract_labels(dataset):
@@ -485,11 +500,12 @@ def print_communication_cost_table(num_classes):
 
 # Estimated gas costs from Hardhat testing (approximate)
 GAS_COSTS = {
-    "registerHospital":        150_000,
-    "startNewRound":            45_000,
-    "submitUpdate":             95_000,
+    # Measured from Hardhat gas benchmarking tests (FLCoordinator.test.js)
+    "registerHospital":        174_764,
+    "startNewRound":            48_942,
+    "submitUpdate":            252_464,
     "calculateWeight (view)":        0,  # view function, no gas
-    "recordEnsemblePrediction": 65_000,
+    "recordEnsemblePrediction": 94_931,
 }
 
 
@@ -534,15 +550,19 @@ def print_gas_cost_table():
 # ═══════════════════════════════════════════════════════════════════════════
 #  Single Experiment Run
 # ═══════════════════════════════════════════════════════════════════════════
-def run_single(dataset_name, noniid_key, seed, train_ds, test_ds, num_classes, epochs=EPOCHS):
+def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_classes, epochs=EPOCHS):
     """
     Run one complete experiment for a (dataset, noniid_level, seed) tuple.
     Returns dict: method_name -> {"acc": float, "f1": float, "ece": float}.
+
+    val_ds is used for computing reliability metrics (confidence, ECE) that
+    determine aggregation weights.  test_ds is used only for final evaluation.
     """
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     alpha = NON_IID_ALPHAS[noniid_key]
+    val_loader  = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
 
     # ── Non-IID split ─────────────────────────────────────────────────────
@@ -636,7 +656,7 @@ def run_single(dataset_name, noniid_key, seed, train_ds, test_ds, num_classes, e
     # ── 5. Ours (full capacity-aware weights) ─────────────────────────────
     reliability = []
     for h in range(NUM_HOSPITALS):
-        conf_int, ece_int = get_reliability_metrics(local_models[h], test_loader)
+        conf_int, ece_int = get_reliability_metrics(local_models[h], val_loader)
         reliability.append((conf_int, ece_int))
 
     our_weights = []
@@ -672,7 +692,7 @@ def run_single(dataset_name, noniid_key, seed, train_ds, test_ds, num_classes, e
 
     nopoc_weights = []
     for h in range(NUM_HOSPITALS):
-        conf_int, ece_int = get_reliability_metrics(nopoc_models[h], test_loader)
+        conf_int, ece_int = get_reliability_metrics(nopoc_models[h], val_loader)
         w = compute_weight(CAPACITY_CLASSES[h], conf_int, ece_int,
                            rounds_participated=1, use_capacity=False)
         nopoc_weights.append(w)
@@ -813,7 +833,7 @@ def save_results_csv(all_results, filepath):
 #  Adversarial / Cheating Experiments
 # ═══════════════════════════════════════════════════════════════════════════
 def run_adversarial_experiment(dataset_name, noniid_key, seed,
-                               train_ds, test_ds, num_classes,
+                               train_ds, val_ds, test_ds, num_classes,
                                epochs, all_raw_results):
     """
     Simulate three cheating scenarios and measure ensemble degradation.
@@ -839,6 +859,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     np.random.seed(seed)
 
     alpha = NON_IID_ALPHAS[noniid_key]
+    val_loader  = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
     hospital_datasets = dirichlet_split(train_ds, num_classes, alpha, seed)
     hospital_loaders = [
@@ -854,7 +875,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
         m = get_model(cap, num_classes)
         train_model(m, hospital_loaders[h], epochs=epochs)
         honest_models.append(m)
-        conf_int, ece_int = get_reliability_metrics(m, test_loader)
+        conf_int, ece_int = get_reliability_metrics(m, val_loader)
         honest_reliability.append((conf_int, ece_int))
 
     honest_weights = []
@@ -880,7 +901,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     train_model(lazy_model, hospital_loaders[2], epochs=1)  # barely trained
     lazy_models[2] = lazy_model
 
-    lazy_conf, lazy_ece = get_reliability_metrics(lazy_model, test_loader)
+    lazy_conf, lazy_ece = get_reliability_metrics(lazy_model, val_loader)
     lazy_reliability = list(honest_reliability)
     lazy_reliability[2] = (lazy_conf, lazy_ece)
 
@@ -927,7 +948,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     train_model(spoofed_model, spoof_loader, epochs=epochs)
     spoof_models[2] = spoofed_model
 
-    spoof_conf, spoof_ece = get_reliability_metrics(spoofed_model, test_loader)
+    spoof_conf, spoof_ece = get_reliability_metrics(spoofed_model, val_loader)
 
     # Without PoC: gets Strong multiplier (1.2x) despite being weak hardware
     spoof_weights_no_poc = []
@@ -1032,7 +1053,7 @@ def print_adversarial_table(results, dataset_name, noniid_key,
     print(f"    Scenario 2: Inflated metrics cause {(inflated_ours_acc-baseline_acc)*100:+.2f}% drop")
     print(f"    -> Self-reported metrics are gameable; blockchain provides audit trail for detection")
     print(f"    Scenario 3: PoC verification recovers to {poc_acc:.4f} accuracy by rejecting the attacker")
-    print(f"    -> On-chain PoC signature prevents capacity spoofing entirely")
+    print(f"    -> On-chain PoC signature deters capacity spoofing under trusted-coordinator semantics")
     print()
 
 
@@ -1068,8 +1089,8 @@ def main():
         print(f"# DATASET: {dataset_name.upper()}")
         print(f"{'#'*80}")
 
-        train_ds, test_ds, num_classes = load_dataset(dataset_name)
-        print(f"  Train: {len(train_ds)} | Test: {len(test_ds)} | Classes: {num_classes}")
+        train_ds, val_ds, test_ds, num_classes = load_dataset(dataset_name)
+        print(f"  Train: {len(train_ds)} | Val: {len(val_ds)} | Test: {len(test_ds)} | Classes: {num_classes}")
 
         stats_by_level = {}
 
@@ -1081,7 +1102,7 @@ def main():
                 t0 = time.time()
                 print(f"\n  [{dataset_name}|{noniid_key}] seed {seed} ({s_idx+1}/{len(seeds)}) ...", end="", flush=True)
 
-                result = run_single(dataset_name, noniid_key, seed, train_ds, test_ds, num_classes, epochs=_epochs)
+                result = run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_classes, epochs=_epochs)
 
                 for method, metrics in result.items():
                     seed_results[method].append(metrics)
@@ -1113,12 +1134,12 @@ def main():
 
     # ── Adversarial / Cheating Experiments ────────────────────────────────
     for dataset_name in args.datasets:
-        train_ds, test_ds, num_classes = load_dataset(dataset_name)
+        train_ds, val_ds, test_ds, num_classes = load_dataset(dataset_name)
         for noniid_key in args.noniid:
             for seed in seeds[:1]:  # one seed is enough for adversarial demo
                 run_adversarial_experiment(
                     dataset_name, noniid_key, seed,
-                    train_ds, test_ds, num_classes,
+                    train_ds, val_ds, test_ds, num_classes,
                     epochs=_epochs,
                     all_raw_results=all_raw_results,
                 )

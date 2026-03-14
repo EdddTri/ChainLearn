@@ -536,4 +536,67 @@ describe("FLCoordinator", function () {
             });
         });
     });
+
+    // =========================================================================
+    //  Gas Benchmarking
+    // =========================================================================
+    describe("Gas Benchmarking", function () {
+        const modelHash = ethers.keccak256(ethers.toUtf8Bytes("model-gas-test"));
+        const predHash = ethers.keccak256(ethers.toUtf8Bytes("ensemble-gas-test"));
+
+        it("should measure gas for registerHospital", async function () {
+            const tx = await contract.registerHospital(
+                hospitalA.address, "Gas Test Hospital", Strong,
+                benchmarkHash, await sigFor(hospitalA, benchmarkHash)
+            );
+            const receipt = await tx.wait();
+            console.log(`      registerHospital gas: ${receipt.gasUsed}`);
+            expect(receipt.gasUsed).to.be.gt(0);
+            expect(receipt.gasUsed).to.be.lt(300_000);
+        });
+
+        it("should measure gas for submitUpdate", async function () {
+            await contract.registerHospital(
+                hospitalA.address, "A", Strong,
+                benchmarkHash, await sigFor(hospitalA, benchmarkHash)
+            );
+            await contract.startNewRound();
+
+            const tx = await contract
+                .connect(hospitalA)
+                .submitUpdate(modelHash, 9500, 500, Heavy);
+            const receipt = await tx.wait();
+            console.log(`      submitUpdate gas: ${receipt.gasUsed}`);
+            expect(receipt.gasUsed).to.be.gt(0);
+            expect(receipt.gasUsed).to.be.lt(300_000);
+        });
+
+        it("should measure gas for startNewRound", async function () {
+            await contract.registerHospital(
+                hospitalA.address, "A", Medium,
+                benchmarkHash, await sigFor(hospitalA, benchmarkHash)
+            );
+
+            const tx = await contract.startNewRound();
+            const receipt = await tx.wait();
+            console.log(`      startNewRound gas: ${receipt.gasUsed}`);
+            expect(receipt.gasUsed).to.be.gt(0);
+            expect(receipt.gasUsed).to.be.lt(100_000);
+        });
+
+        it("should measure gas for recordEnsemblePrediction", async function () {
+            await contract.registerHospital(
+                hospitalA.address, "A", Strong,
+                benchmarkHash, await sigFor(hospitalA, benchmarkHash)
+            );
+            await contract.startNewRound();
+            await contract.connect(hospitalA).submitUpdate(modelHash, 9000, 300, Heavy);
+
+            const tx = await contract.recordEnsemblePrediction(predHash, 1);
+            const receipt = await tx.wait();
+            console.log(`      recordEnsemblePrediction gas: ${receipt.gasUsed}`);
+            expect(receipt.gasUsed).to.be.gt(0);
+            expect(receipt.gasUsed).to.be.lt(150_000);
+        });
+    });
 });
