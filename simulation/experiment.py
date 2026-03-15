@@ -49,16 +49,25 @@ import torchvision.models as models
 import torchvision.transforms as transforms
 from sklearn.metrics import f1_score as sklearn_f1
 from torch.utils.data import DataLoader, Subset
+from tqdm import tqdm
 
 import medmnist
 from medmnist import PneumoniaMNIST, DermaMNIST
 
 # ── Config ─────────────────────────────────────────────────────────────────
-EPOCHS     = 5
-BATCH_SIZE = 32
+EPOCHS     = 15
+BATCH_SIZE = 64 if torch.cuda.is_available() else 32  # conservative GPU batch
 LR         = 0.001
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
+NUM_WORKERS = 2 if torch.cuda.is_available() else 0
+PIN_MEMORY  = torch.cuda.is_available()
+USE_AMP     = torch.cuda.is_available()
 SCALE      = 10_000
+
+# Safe GPU optimizations (no-ops on CPU)
+if torch.cuda.is_available():
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 
 NUM_HOSPITALS = 3
 CAPACITY_CLASSES = ["Weak", "Medium", "Strong"]
@@ -196,18 +205,28 @@ def get_model(capacity_class, num_classes):
 # ═══════════════════════════════════════════════════════════════════════════
 #  Training
 # ═══════════════════════════════════════════════════════════════════════════
-def train_model(model, dataloader, epochs=EPOCHS):
+def train_model(model, dataloader, epochs=EPOCHS, label=""):
     model.train()
     opt = optim.Adam(model.parameters(), lr=LR)
     crit = nn.CrossEntropyLoss()
-    for _ in range(epochs):
+    scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
+    epoch_iter = tqdm(range(epochs), desc=f"    {label}" if label else "    Training",
+                      leave=False, ncols=80)
+    for ep in epoch_iter:
+        running_loss = 0.0
+        n_batches = 0
         for x, y in dataloader:
-            x = x.to(DEVICE)
-            y = y.to(DEVICE).view(-1).long()
-            opt.zero_grad()
-            loss = crit(model(x), y)
-            loss.backward()
-            opt.step()
+            x = x.to(DEVICE, non_blocking=PIN_MEMORY)
+            y = y.to(DEVICE, non_blocking=PIN_MEMORY).view(-1).long()
+            opt.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", enabled=USE_AMP):
+                loss = crit(model(x), y)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            running_loss += loss.item()
+            n_batches += 1
+        epoch_iter.set_postfix(loss=f"{running_loss/n_batches:.3f}")
     return model
 
 
@@ -221,9 +240,10 @@ def evaluate_model(model, dataloader):
 
     with torch.no_grad():
         for x, y in dataloader:
-            x = x.to(DEVICE)
-            y = y.to(DEVICE).view(-1).long()
-            probs = F.softmax(model(x), dim=1)
+            x = x.to(DEVICE, non_blocking=PIN_MEMORY)
+            y = y.to(DEVICE, non_blocking=PIN_MEMORY).view(-1).long()
+            with torch.autocast(device_type="cuda", enabled=USE_AMP):
+                probs = F.softmax(model(x), dim=1)
             confs, preds = probs.max(dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(y.cpu().numpy())
@@ -249,14 +269,14 @@ def evaluate_ensemble(models_list, weights, dataloader, num_classes):
     all_preds, all_labels, all_confs = [], [], []
 
     for x, y in dataloader:
-        x = x.to(DEVICE)
+        x = x.to(DEVICE, non_blocking=PIN_MEMORY)
         y = y.view(-1).long()
 
         ensemble_probs = torch.zeros(x.size(0), num_classes)
         for model, w in zip(models_list, normed):
             model.eval()
-            with torch.no_grad():
-                probs = F.softmax(model(x), dim=1).cpu()
+            with torch.no_grad(), torch.autocast(device_type="cuda", enabled=USE_AMP):
+                probs = F.softmax(model(x), dim=1).cpu().float()
                 ensemble_probs += w * probs
 
         confs, preds = ensemble_probs.max(dim=1)
@@ -347,25 +367,37 @@ def fedavg(models_list):
 FEDPROX_MU = 0.01  # proximal regularization strength
 
 
-def train_model_fedprox(model, dataloader, global_state_dict, mu=FEDPROX_MU, epochs=EPOCHS):
+def train_model_fedprox(model, dataloader, global_state_dict, mu=FEDPROX_MU, epochs=EPOCHS, label=""):
     """Train with FedProx proximal term: loss += (mu/2) * ||w - w_global||^2."""
     model.train()
     opt = optim.Adam(model.parameters(), lr=LR)
     crit = nn.CrossEntropyLoss()
-    for _ in range(epochs):
+    scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
+    # Cache global params on device once
+    global_on_device = {k: v.to(DEVICE) for k, v in global_state_dict.items()}
+    epoch_iter = tqdm(range(epochs), desc=f"    {label}" if label else "    FedProx",
+                      leave=False, ncols=80)
+    for _ in epoch_iter:
+        running_loss = 0.0
+        n_batches = 0
         for x, y in dataloader:
-            x = x.to(DEVICE)
-            y = y.to(DEVICE).view(-1).long()
-            opt.zero_grad()
-            loss = crit(model(x), y)
-            # Proximal term
-            prox = 0.0
-            for name, param in model.named_parameters():
-                if name in global_state_dict:
-                    prox += ((param - global_state_dict[name].to(DEVICE)) ** 2).sum()
-            loss += (mu / 2.0) * prox
-            loss.backward()
-            opt.step()
+            x = x.to(DEVICE, non_blocking=PIN_MEMORY)
+            y = y.to(DEVICE, non_blocking=PIN_MEMORY).view(-1).long()
+            opt.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", enabled=USE_AMP):
+                loss = crit(model(x), y)
+                # Proximal term (inside autocast)
+                prox = 0.0
+                for name, param in model.named_parameters():
+                    if name in global_on_device:
+                        prox += ((param - global_on_device[name]) ** 2).sum()
+                loss += (mu / 2.0) * prox
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            running_loss += loss.item()
+            n_batches += 1
+        epoch_iter.set_postfix(loss=f"{running_loss/n_batches:.3f}")
     return model
 
 
@@ -393,13 +425,13 @@ def fedmd_consensus_logits(models_list, public_loader, num_classes):
     """Compute average softmax logits across all models on the public set."""
     all_avg = []
     for x, _ in public_loader:
-        x = x.to(DEVICE)
+        x = x.to(DEVICE, non_blocking=PIN_MEMORY)
         batch_sum = torch.zeros(x.size(0), num_classes, device=DEVICE)
         for m in models_list:
             m.eval()
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast(device_type="cuda", enabled=USE_AMP):
                 batch_sum += F.softmax(m(x) / FEDMD_KD_TEMP, dim=1)
-        all_avg.append((batch_sum / len(models_list)).cpu())
+        all_avg.append((batch_sum / len(models_list)).cpu().float())
     return torch.cat(all_avg, dim=0)
 
 
@@ -411,21 +443,24 @@ def fedmd_digest(model, public_loader, consensus, temp=FEDMD_KD_TEMP, epochs=FED
     model.train()
     opt = optim.Adam(model.parameters(), lr=LR * 0.1)
     kl = nn.KLDivLoss(reduction="batchmean")
+    scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
 
     idx = 0
     for _ in range(epochs):
         idx = 0
         for x, _ in public_loader:
-            x = x.to(DEVICE)
+            x = x.to(DEVICE, non_blocking=PIN_MEMORY)
             bs = x.size(0)
-            target = consensus[idx:idx + bs].to(DEVICE)
+            target = consensus[idx:idx + bs].to(DEVICE, non_blocking=PIN_MEMORY)
             idx += bs
 
-            opt.zero_grad()
-            student_log = F.log_softmax(model(x) / temp, dim=1)
-            loss = kl(student_log, target) * (temp ** 2)
-            loss.backward()
-            opt.step()
+            opt.zero_grad(set_to_none=True)
+            with torch.autocast(device_type="cuda", enabled=USE_AMP):
+                student_log = F.log_softmax(model(x) / temp, dim=1)
+                loss = kl(student_log, target) * (temp ** 2)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
     return model
 
 
@@ -562,29 +597,32 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
     np.random.seed(seed)
 
     alpha = NON_IID_ALPHAS[noniid_key]
-    val_loader  = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+    dl_kwargs = dict(num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY)
+    val_loader  = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
 
     # ── Non-IID split ─────────────────────────────────────────────────────
     hospital_datasets = dirichlet_split(train_ds, num_classes, alpha, seed)
     hospital_loaders = [
-        DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True) for ds in hospital_datasets
+        DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, **dl_kwargs) for ds in hospital_datasets
     ]
 
     results = {}
 
     # ── 1. Centralized ────────────────────────────────────────────────────
-    central_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True)
+    print("    [1/7] Centralized training...")
+    central_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, **dl_kwargs)
     central_model = get_model("Strong", num_classes)
-    train_model(central_model, central_loader, epochs=epochs)
+    train_model(central_model, central_loader, epochs=epochs, label="Centralized")
     results["Centralized"] = dict(zip(("acc", "f1", "ece"), evaluate_model(central_model, test_loader)))
 
     # ── 2. Local-only (capacity-aware models) ─────────────────────────────
+    print("    [2/7] Local-only training...")
     local_models = []
     for h in range(NUM_HOSPITALS):
         cap = CAPACITY_CLASSES[h]
         m = get_model(cap, num_classes)
-        train_model(m, hospital_loaders[h], epochs=epochs)
+        train_model(m, hospital_loaders[h], epochs=epochs, label=f"Local-{cap}")
         local_models.append(m)
 
     best_local_acc = -1
@@ -596,34 +634,37 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
             results["Local-Best"] = {"acc": acc, "f1": f1, "ece": ece}
 
     # ── 3. FedAvg (uniform ResNet-50, param averaging) ────────────────────
+    print("    [3/7] FedAvg training...")
     fedavg_models = []
     for h in range(NUM_HOSPITALS):
         m = get_model("Strong", num_classes)
-        train_model(m, hospital_loaders[h], epochs=epochs)
+        train_model(m, hospital_loaders[h], epochs=epochs, label=f"FedAvg-H{h}")
         fedavg_models.append(m)
     global_model = fedavg(fedavg_models)
     results["FedAvg"] = dict(zip(("acc", "f1", "ece"), evaluate_model(global_model, test_loader)))
 
     # ── 3b. FedProx (uniform ResNet-50, proximal term) ─────────────────
+    print("    [4/7] FedProx training...")
     global_init = get_model("Strong", num_classes)
     global_state = copy.deepcopy(global_init.state_dict())
     fedprox_models = []
     for h in range(NUM_HOSPITALS):
         m = get_model("Strong", num_classes)
         m.load_state_dict(copy.deepcopy(global_state))
-        train_model_fedprox(m, hospital_loaders[h], global_state, mu=FEDPROX_MU, epochs=epochs)
+        train_model_fedprox(m, hospital_loaders[h], global_state, mu=FEDPROX_MU, epochs=epochs, label=f"FedProx-H{h}")
         fedprox_models.append(m)
     fedprox_global = fedavg(fedprox_models)
     results["FedProx"] = dict(zip(("acc", "f1", "ece"), evaluate_model(fedprox_global, test_loader)))
 
     # ── 3c. FedMD (heterogeneous KD via public data) ───────────────────
+    print("    [5/7] FedMD training...")
     public_ds, private_ds = fedmd_split_public(train_ds, FEDMD_PUBLIC_FRAC, seed)
-    public_loader = DataLoader(public_ds, batch_size=BATCH_SIZE, shuffle=False)
+    public_loader = DataLoader(public_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
 
     # Split private data across hospitals using same Dirichlet
     private_hospital_ds = dirichlet_split(private_ds, num_classes, alpha, seed + 1)
     private_loaders = [
-        DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True) for ds in private_hospital_ds
+        DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, **dl_kwargs) for ds in private_hospital_ds
     ]
 
     # Phase 1: each hospital trains locally on its private shard
@@ -631,7 +672,7 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
     for h in range(NUM_HOSPITALS):
         cap = CAPACITY_CLASSES[h]
         m = get_model(cap, num_classes)
-        train_model(m, private_loaders[h], epochs=epochs)
+        train_model(m, private_loaders[h], epochs=epochs, label=f"FedMD-{cap}")
         fedmd_models.append(m)
 
     # Phase 2: compute consensus logits on public data, then digest
@@ -647,6 +688,7 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
     ))
 
     # ── 4. Equal-weight ensemble (capacity-aware models) ──────────────────
+    print("    [6/7] Evaluating ensembles & ablations...")
     eq_weights = [1.0 / NUM_HOSPITALS] * NUM_HOSPITALS
     results["EqualWt-Ens"] = dict(zip(
         ("acc", "f1", "ece"),
@@ -684,10 +726,11 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
         ))
 
     # ── 10. No-PoC ablation (uniform arch, equal cap_mul) ─────────────────
+    print("    [7/7] No-PoC ablation training...")
     nopoc_models = []
     for h in range(NUM_HOSPITALS):
         m = get_model("Medium", num_classes)  # all train EfficientNet-B0
-        train_model(m, hospital_loaders[h], epochs=epochs)
+        train_model(m, hospital_loaders[h], epochs=epochs, label=f"NoPoC-H{h}")
         nopoc_models.append(m)
 
     nopoc_weights = []
@@ -859,21 +902,23 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     np.random.seed(seed)
 
     alpha = NON_IID_ALPHAS[noniid_key]
-    val_loader  = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
-    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False)
+    dl_kwargs = dict(num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY)
+    val_loader  = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
     hospital_datasets = dirichlet_split(train_ds, num_classes, alpha, seed)
     hospital_loaders = [
-        DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True) for ds in hospital_datasets
+        DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, **dl_kwargs) for ds in hospital_datasets
     ]
 
     # ── Honest baseline (reuse from main results if available) ─────────
     # Train all 3 hospitals honestly
+    print("    [adv] Training honest baseline...")
     honest_models = []
     honest_reliability = []
     for h in range(NUM_HOSPITALS):
         cap = CAPACITY_CLASSES[h]
         m = get_model(cap, num_classes)
-        train_model(m, hospital_loaders[h], epochs=epochs)
+        train_model(m, hospital_loaders[h], epochs=epochs, label=f"Honest-{cap}")
         honest_models.append(m)
         conf_int, ece_int = get_reliability_metrics(m, val_loader)
         honest_reliability.append((conf_int, ece_int))
@@ -895,10 +940,10 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     results["No attack (EqualWt)"] = dict(zip(("acc", "f1", "ece"), baseline_eq))
 
     # ── Scenario 1: Lazy hospital, honest metrics ──────────────────────
-    # Hospital 2 (Strong) trains only 1 epoch instead of full
+    print("    [adv] Scenario 1: Lazy hospital...")
     lazy_models = list(honest_models)  # shallow copy list
     lazy_model = get_model("Strong", num_classes)
-    train_model(lazy_model, hospital_loaders[2], epochs=1)  # barely trained
+    train_model(lazy_model, hospital_loaders[2], epochs=1, label="Lazy")  # barely trained
     lazy_models[2] = lazy_model
 
     lazy_conf, lazy_ece = get_reliability_metrics(lazy_model, val_loader)
@@ -917,6 +962,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
         evaluate_ensemble(lazy_models, eq_w, test_loader, num_classes)))
 
     # ── Scenario 2: Bad model + inflated metrics ───────────────────────
+    print("    [adv] Scenario 2: Inflated metrics...")
     # Hospital 2 trains poorly but reports confidence=SCALE, ECE=0
     inflated_reliability = list(honest_reliability)
     inflated_reliability[2] = (SCALE, 0)  # lies: perfect confidence, zero ECE
@@ -933,6 +979,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
         evaluate_ensemble(lazy_models, eq_w, test_loader, num_classes)))
 
     # ── Scenario 3: Capacity spoofing (no PoC verification) ────────────
+    print("    [adv] Scenario 3: Capacity spoofing...")
     # Hospital 2 is actually Weak but claims Strong.
     # Without PoC: gets ResNet-50 (too heavy for weak hardware).
     # Simulate weak hardware by training on only 10% of its data.
@@ -942,10 +989,10 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     n_spoof = max(1, len(spoofed_dataset) // 10)  # only 10% of data
     spoof_subset = Subset(spoofed_dataset.dataset,
                           spoofed_dataset.indices[:n_spoof])
-    spoof_loader = DataLoader(spoof_subset, batch_size=BATCH_SIZE, shuffle=True)
+    spoof_loader = DataLoader(spoof_subset, batch_size=BATCH_SIZE, shuffle=True, **dl_kwargs)
 
     spoofed_model = get_model("Strong", num_classes)  # claims Strong -> ResNet-50
-    train_model(spoofed_model, spoof_loader, epochs=epochs)
+    train_model(spoofed_model, spoof_loader, epochs=epochs, label="Spoofed")
     spoof_models[2] = spoofed_model
 
     spoof_conf, spoof_ece = get_reliability_metrics(spoofed_model, val_loader)
@@ -1075,7 +1122,7 @@ def main():
     seeds = list(range(42, 42 + args.seeds * 100, 100))[:args.seeds]
     # e.g. seeds=[42, 142, 242, 342, 442] for 5 seeds
 
-    print(f"Device:   {DEVICE}")
+    print(f"Device:   {DEVICE}  |  AMP: {USE_AMP}  |  Batch: {BATCH_SIZE}  |  Workers: {NUM_WORKERS}")
     print(f"Seeds:    {seeds}")
     print(f"Datasets: {args.datasets}")
     print(f"Non-IID:  {args.noniid}")

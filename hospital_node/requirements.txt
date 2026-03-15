@@ -9,3 +9,4 @@ python-dotenv>=1.0.0
 flask>=3.0.0
 cryptography>=41.0.0
 medmnist==3.0.2
+tqdm>=4.65.0
