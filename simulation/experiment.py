@@ -56,18 +56,20 @@ from medmnist import PneumoniaMNIST, DermaMNIST
 
 # ── Config ─────────────────────────────────────────────────────────────────
 EPOCHS     = 15
-BATCH_SIZE = 64 if torch.cuda.is_available() else 32  # conservative GPU batch
+BATCH_SIZE = 512 if torch.cuda.is_available() else 32
 LR         = 0.001
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
-NUM_WORKERS = 2 if torch.cuda.is_available() else 0
+NUM_WORKERS = 16 if torch.cuda.is_available() else 0
 PIN_MEMORY  = torch.cuda.is_available()
 USE_AMP     = torch.cuda.is_available()
+AMP_DTYPE   = torch.bfloat16  # Blackwell compute cap 12.1 — native BF16 tensor cores
 SCALE      = 10_000
 
-# Safe GPU optimizations (no-ops on CPU)
+# GPU optimizations
 if torch.cuda.is_available():
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.allow_tf32 = True
 
 NUM_HOSPITALS = 3
 CAPACITY_CLASSES = ["Weak", "Medium", "Strong"]
@@ -182,6 +184,12 @@ def dirichlet_split(dataset, num_classes, alpha, seed):
     for h in range(NUM_HOSPITALS):
         rng.shuffle(hospital_indices[h])
 
+    # Ensure no hospital is empty (can happen with severe non-IID + small datasets)
+    for h in range(NUM_HOSPITALS):
+        if len(hospital_indices[h]) == 0:
+            donor = max(range(NUM_HOSPITALS), key=lambda i: len(hospital_indices[i]))
+            hospital_indices[h].append(hospital_indices[donor].pop())
+
     return [Subset(dataset, idx) for idx in hospital_indices]
 
 
@@ -199,7 +207,10 @@ def get_model(capacity_class, num_classes):
     else:  # Strong
         m = models.resnet50(weights=None)
         m.fc = nn.Linear(m.fc.in_features, num_classes)
-    return m.to(DEVICE)
+    m = m.to(DEVICE)
+    if torch.cuda.is_available():
+        m = m.to(memory_format=torch.channels_last)
+    return m
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -209,7 +220,7 @@ def train_model(model, dataloader, epochs=EPOCHS, label=""):
     model.train()
     opt = optim.Adam(model.parameters(), lr=LR)
     crit = nn.CrossEntropyLoss()
-    scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
     epoch_iter = tqdm(range(epochs), desc=f"    {label}" if label else "    Training",
                       leave=False, ncols=80)
     for ep in epoch_iter:
@@ -219,7 +230,7 @@ def train_model(model, dataloader, epochs=EPOCHS, label=""):
             x = x.to(DEVICE, non_blocking=PIN_MEMORY)
             y = y.to(DEVICE, non_blocking=PIN_MEMORY).view(-1).long()
             opt.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", enabled=USE_AMP):
+            with torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=USE_AMP):
                 loss = crit(model(x), y)
             scaler.scale(loss).backward()
             scaler.step(opt)
@@ -242,7 +253,7 @@ def evaluate_model(model, dataloader):
         for x, y in dataloader:
             x = x.to(DEVICE, non_blocking=PIN_MEMORY)
             y = y.to(DEVICE, non_blocking=PIN_MEMORY).view(-1).long()
-            with torch.autocast(device_type="cuda", enabled=USE_AMP):
+            with torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=USE_AMP):
                 probs = F.softmax(model(x), dim=1)
             confs, preds = probs.max(dim=1)
             all_preds.extend(preds.cpu().numpy())
@@ -275,7 +286,7 @@ def evaluate_ensemble(models_list, weights, dataloader, num_classes):
         ensemble_probs = torch.zeros(x.size(0), num_classes)
         for model, w in zip(models_list, normed):
             model.eval()
-            with torch.no_grad(), torch.autocast(device_type="cuda", enabled=USE_AMP):
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=USE_AMP):
                 probs = F.softmax(model(x), dim=1).cpu().float()
                 ensemble_probs += w * probs
 
@@ -372,7 +383,7 @@ def train_model_fedprox(model, dataloader, global_state_dict, mu=FEDPROX_MU, epo
     model.train()
     opt = optim.Adam(model.parameters(), lr=LR)
     crit = nn.CrossEntropyLoss()
-    scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
     # Cache global params on device once
     global_on_device = {k: v.to(DEVICE) for k, v in global_state_dict.items()}
     epoch_iter = tqdm(range(epochs), desc=f"    {label}" if label else "    FedProx",
@@ -384,7 +395,7 @@ def train_model_fedprox(model, dataloader, global_state_dict, mu=FEDPROX_MU, epo
             x = x.to(DEVICE, non_blocking=PIN_MEMORY)
             y = y.to(DEVICE, non_blocking=PIN_MEMORY).view(-1).long()
             opt.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", enabled=USE_AMP):
+            with torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=USE_AMP):
                 loss = crit(model(x), y)
                 # Proximal term (inside autocast)
                 prox = 0.0
@@ -429,7 +440,7 @@ def fedmd_consensus_logits(models_list, public_loader, num_classes):
         batch_sum = torch.zeros(x.size(0), num_classes, device=DEVICE)
         for m in models_list:
             m.eval()
-            with torch.no_grad(), torch.autocast(device_type="cuda", enabled=USE_AMP):
+            with torch.no_grad(), torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=USE_AMP):
                 batch_sum += F.softmax(m(x) / FEDMD_KD_TEMP, dim=1)
         all_avg.append((batch_sum / len(models_list)).cpu().float())
     return torch.cat(all_avg, dim=0)
@@ -443,7 +454,7 @@ def fedmd_digest(model, public_loader, consensus, temp=FEDMD_KD_TEMP, epochs=FED
     model.train()
     opt = optim.Adam(model.parameters(), lr=LR * 0.1)
     kl = nn.KLDivLoss(reduction="batchmean")
-    scaler = torch.amp.GradScaler("cuda", enabled=USE_AMP)
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
 
     idx = 0
     for _ in range(epochs):
@@ -455,7 +466,7 @@ def fedmd_digest(model, public_loader, consensus, temp=FEDMD_KD_TEMP, epochs=FED
             idx += bs
 
             opt.zero_grad(set_to_none=True)
-            with torch.autocast(device_type="cuda", enabled=USE_AMP):
+            with torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=USE_AMP):
                 student_log = F.log_softmax(model(x) / temp, dim=1)
                 loss = kl(student_log, target) * (temp ** 2)
             scaler.scale(loss).backward()
@@ -597,7 +608,9 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
     np.random.seed(seed)
 
     alpha = NON_IID_ALPHAS[noniid_key]
-    dl_kwargs = dict(num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY)
+    dl_kwargs = dict(num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                     persistent_workers=(NUM_WORKERS > 0),
+                     prefetch_factor=(4 if NUM_WORKERS > 0 else None))
     val_loader  = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
 
@@ -847,8 +860,32 @@ def print_noniid_comparison(stats_by_level, dataset_name):
 # ═══════════════════════════════════════════════════════════════════════════
 #  CSV Export
 # ═══════════════════════════════════════════════════════════════════════════
+_CSV_FIELDNAMES = ["dataset", "noniid", "seed", "method", "accuracy", "f1_score", "ece"]
+
+
+def append_results_csv(dataset, noniid, seed, result_dict, filepath):
+    """Append one seed's results to CSV (creates file with header if needed)."""
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    write_header = not os.path.exists(filepath)
+
+    with open(filepath, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDNAMES)
+        if write_header:
+            writer.writeheader()
+        for method, metrics in result_dict.items():
+            writer.writerow({
+                "dataset": dataset,
+                "noniid": noniid,
+                "seed": seed,
+                "method": method,
+                "accuracy": metrics["acc"],
+                "f1_score": metrics["f1"],
+                "ece": metrics["ece"],
+            })
+
+
 def save_results_csv(all_results, filepath):
-    """Save all raw results to CSV."""
+    """Save all raw results to CSV (full rewrite)."""
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
 
     rows = []
@@ -865,7 +902,7 @@ def save_results_csv(all_results, filepath):
             })
 
     with open(filepath, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=["dataset", "noniid", "seed", "method", "accuracy", "f1_score", "ece"])
+        writer = csv.DictWriter(f, fieldnames=_CSV_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
 
@@ -902,7 +939,9 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     np.random.seed(seed)
 
     alpha = NON_IID_ALPHAS[noniid_key]
-    dl_kwargs = dict(num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY)
+    dl_kwargs = dict(num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
+                     persistent_workers=(NUM_WORKERS > 0),
+                     prefetch_factor=(4 if NUM_WORKERS > 0 else None))
     val_loader  = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
     test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, **dl_kwargs)
     hospital_datasets = dirichlet_split(train_ds, num_classes, alpha, seed)
@@ -1115,12 +1154,22 @@ def main():
     parser.add_argument("--noniid", nargs="+", default=list(NON_IID_ALPHAS.keys()),
                         choices=list(NON_IID_ALPHAS.keys()), help="Non-IID levels")
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="Training epochs per hospital")
+    parser.add_argument("--resume", action="store_true", help="Skip (dataset, noniid, seed) combos already in CSV")
     args = parser.parse_args()
 
     _epochs = args.epochs
 
     seeds = list(range(42, 42 + args.seeds * 100, 100))[:args.seeds]
-    # e.g. seeds=[42, 142, 242, 342, 442] for 5 seeds
+
+    # Load completed runs from CSV if resuming
+    completed = set()
+    csv_path = os.path.join(RESULTS_DIR, "experiment_results.csv")
+    if args.resume and os.path.exists(csv_path):
+        with open(csv_path, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                completed.add((row["dataset"], row["noniid"], int(row["seed"])))
+        print(f"Resuming: {len(completed)} (dataset, noniid, seed) combos already done")
 
     print(f"Device:   {DEVICE}  |  AMP: {USE_AMP}  |  Batch: {BATCH_SIZE}  |  Workers: {NUM_WORKERS}")
     print(f"Seeds:    {seeds}")
@@ -1146,6 +1195,20 @@ def main():
             seed_results = defaultdict(list)
 
             for s_idx, seed in enumerate(seeds):
+                if (dataset_name, noniid_key, seed) in completed:
+                    print(f"\n  [{dataset_name}|{noniid_key}] seed {seed} ({s_idx+1}/{len(seeds)}) ... skipped (already done)")
+                    # Reload from CSV
+                    with open(csv_path, "r", encoding="utf-8") as f:
+                        reader = csv.DictReader(f)
+                        result = {}
+                        for row in reader:
+                            if row["dataset"] == dataset_name and row["noniid"] == noniid_key and int(row["seed"]) == seed:
+                                result[row["method"]] = {"acc": float(row["accuracy"]), "f1": float(row["f1_score"]), "ece": float(row["ece"])}
+                    for method, metrics in result.items():
+                        seed_results[method].append(metrics)
+                    all_raw_results[(dataset_name, noniid_key, seed)] = result
+                    continue
+
                 t0 = time.time()
                 print(f"\n  [{dataset_name}|{noniid_key}] seed {seed} ({s_idx+1}/{len(seeds)}) ...", end="", flush=True)
 
@@ -1155,6 +1218,7 @@ def main():
                     seed_results[method].append(metrics)
 
                 all_raw_results[(dataset_name, noniid_key, seed)] = result
+                append_results_csv(dataset_name, noniid_key, seed, result, csv_path)
                 elapsed = time.time() - t0
                 print(f" done [{elapsed:.0f}s]")
 

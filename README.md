@@ -1,4 +1,4 @@
-# Capacity-Aware Decentralized Federated Ensemble Learning with Blockchain Coordination
+# ChainLearn: Blockchain-Based Capacity-Aware Federated Ensemble Learning
 
 A federated learning framework for medical imaging that uses blockchain-based coordination, hardware-aware model assignment, and weighted ensemble aggregation. Hospital nodes undergo a Proof of Capacity (PoC) benchmark, receive capacity-appropriate model architectures, train locally on private data, and submit reliability metrics to an Ethereum smart contract. The final prediction is a weighted ensemble of heterogeneous models, with weights computed deterministically on-chain.
 
@@ -85,7 +85,12 @@ The ensemble prediction hash is recorded on-chain via `recordEnsemblePrediction(
 ## Project Structure
 
 ```
-federated-learning/
+ChainLearn/
+|-- compute_stats.py          # Recomputes all cited figures from experiment_results.csv
+|-- generate_figures.py         # Generates paper figures (figures/*.pdf)
+|-- figures/                    # Generated PDFs: fig1_accuracy, fig2_ece,
+|                               #   fig3_ablation, fig4_communication
+|
 |-- smart_contracts/
 |   |-- contracts/
 |   |   |-- FLCoordinator.sol       # Solidity smart contract
@@ -108,7 +113,9 @@ federated-learning/
 |   |-- run_simulation.py       # End-to-end simulation with local Hardhat node
 |   |-- experiment.py           # Comprehensive experiment: baselines, ablations, stats
 |   |-- simulate_federation.py  # Basic FL simulation (synthetic data)
-|   |-- test_blockchain_integration.py  # Integration smoke test
+|   |-- test_blockchain_integration.py  # Integration smoke test (currently failing)
+|   |-- results/
+|   |   |-- experiment_results.csv  # Output from experiment.py
 ```
 
 ### File Descriptions
@@ -215,38 +222,36 @@ Three attack scenarios test the robustness of the on-chain coordination:
 
 ### Communication Cost Analysis
 
-Per-round communication cost comparison across methods:
+Per-round communication cost comparison across methods (upload + download per hospital):
 
-| Method | What is Sent | Per-Hospital Cost | Total (3 hospitals) |
+| Method | Upload | Download | Total |
 |---|---|---|---|
-| **FedAvg** | Full ResNet-50 parameters (23.5M params) | ~94 MB | ~282 MB |
-| **FedProx** | Full ResNet-50 parameters (same as FedAvg) | ~94 MB | ~282 MB |
-| **FedMD** | Logits on public dataset (~1300 samples) | ~4 KB | ~12 KB |
-| **Ours** | model_hash + confidence + ECE + modelType (4 values) | ~224 B | ~672 B |
+| **FedAvg / FedProx** | 102.2 MB | 102.2 MB | 204.5 MB |
+| **FedMD** | 4.0 KB | 4.0 KB | 8.0 KB |
+| **Ours** | 128 B | 96 B | **224 B** |
 
-Our method achieves the lowest communication overhead by transmitting only a hash and scalar metrics, with the ensemble computed from locally-stored models.
+Ours transmits 4 × 32-byte ABI-encoded values (model hash, confidence, ECE, modelType) on upload and reads back 3 weights on download. This gives a **912,751× reduction** vs FedAvg, computed directly from parameter counts (25,557,032 params × 4 bytes = 102.2 MB per direction for ResNet-50).
 
 ### Gas Cost Analysis
 
-Estimated gas costs for on-chain operations:
+Gas costs measured from the Hardhat test suite (`FLCoordinator.test.js`) at 20 Gwei, $2,000/ETH:
 
-| Operation | Gas Cost | USD (at 30 Gwei, ETH=$2000) |
-|---|---|---|
-| `registerHospital()` | ~150,000 | ~$0.009 |
-| `startNewRound()` | ~45,000 | ~$0.003 |
-| `submitUpdate()` | ~95,000 | ~$0.006 |
-| `calculateWeight()` (view) | 0 (free) | $0.000 |
-| `recordEnsemblePrediction()` | ~65,000 | ~$0.004 |
-| **Total per round (3 hospitals)** | **~395,000** | **~$0.024** |
+| Operation | Gas | USD | Frequency |
+|---|---|---|---|
+| `registerHospital()` | 174,764 | $6.99 | Once per hospital |
+| `startNewRound()` | 48,942 | $1.96 | Once per round |
+| `submitUpdate()` | 252,464 | $10.10 | Per hospital/round |
+| `calculateWeight()` (view) | 0 | Free | Per hospital/round |
+| `recordEnsemblePrediction()` | 94,931 | $3.80 | Once per round |
+| **Total per round (3 hospitals)** | **901,265** | **$36.05** | |
 
-The on-chain overhead is negligible, making the system practical for real deployment.
+`submitUpdate` dominates (3 × 252,464 = 757,392 gas) because it writes a full `Submission` struct to storage. L2 rollups reduce all costs by 10–100×.
 
 ### Datasets
 
-- **PneumoniaMNIST** -- Chest X-rays, 2 classes (normal/pneumonia)
-- **DermaMNIST** -- Dermatoscopy images, 7 classes
+- **PneumoniaMNIST** -- Chest X-rays, 2 classes (normal/pneumonia). 4,708 train / 524 val / 624 test images, resized from 28×28 to 224×224×3 for ImageNet-compatible backbones.
 
-Both sourced from [MedMNIST](https://medmnist.com/).
+Sourced from [MedMNIST](https://medmnist.com/). All paper results use PneumoniaMNIST only.
 
 ### Non-IID Data Splitting
 
@@ -317,6 +322,17 @@ python simulation/run_simulation.py --rounds 5   # 5 rounds
 
 ```bash
 python simulation/experiment.py --seeds 3 --epochs 5
+```
+
+### 5. Reproduce Paper Numbers and Figures
+
+```bash
+# Verify all cited statistics match experiment_results.csv
+python compute_stats.py
+
+# Regenerate all 4 paper figures into figures/
+pip install matplotlib
+python generate_figures.py
 ```
 
 ## Prerequisites
