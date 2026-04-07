@@ -74,7 +74,7 @@ def collect(rows, method, noniid, dataset="pneumoniamnist",
 def print_main_results(rows):
     main_methods = [
         "Centralized", "Local-Best", "FedAvg", "FedProx",
-        "FedMD", "EqualWt-Ens", "Ours",
+        "FedMD", "EqualWt-Ens", "Ours", "Ours-Dropout",
     ]
     print("\n" + "=" * 80)
     print("  MAIN COMPARISON — PneumoniaMNIST (mean ± std, 5 seeds)")

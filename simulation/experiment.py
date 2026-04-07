@@ -81,6 +81,10 @@ MAX_WEIGHT = 15_000
 PARTICIPATION_BONUS = 500
 MAX_BONUS = 2_500
 
+# Dropout participation rates (probability of participating each round)
+# Weak hardware is always available; Strong hardware is scarce/shared
+PARTICIPATION_RATES = {"Weak": 1.0, "Medium": 0.8, "Strong": 0.6}
+
 DATASET_REGISTRY = {
     "pneumoniamnist": {"cls": PneumoniaMNIST, "num_classes": 2},
     "dermamnist":     {"cls": DermaMNIST,     "num_classes": 7},
@@ -358,15 +362,21 @@ def compute_weight(capacity_class, confidence, ece, rounds_participated=1,
 # ═══════════════════════════════════════════════════════════════════════════
 #  FedAvg
 # ═══════════════════════════════════════════════════════════════════════════
-def fedavg(models_list):
-    """Average model parameters (all models must share the same architecture)."""
-    avg_state = copy.deepcopy(models_list[0].state_dict())
+def fedavg(models_list, data_sizes=None):
+    """Weighted average of model parameters (canonical FedAvg: weight by dataset size)."""
     n = len(models_list)
-    for key in avg_state:
-        avg_state[key] = avg_state[key].float()
-        for i in range(1, n):
-            avg_state[key] += models_list[i].state_dict()[key].float()
-        avg_state[key] /= n
+    if data_sizes is None:
+        weights = [1.0 / n] * n
+    else:
+        total = sum(data_sizes)
+        weights = [s / total for s in data_sizes]
+
+    avg_state = {}
+    for key in models_list[0].state_dict():
+        avg_state[key] = sum(
+            w * m.state_dict()[key].float()
+            for w, m in zip(weights, models_list)
+        )
     result = copy.deepcopy(models_list[0])
     result.load_state_dict(avg_state)
     return result
@@ -376,6 +386,7 @@ def fedavg(models_list):
 #  FedProx (FedAvg + proximal term)
 # ═══════════════════════════════════════════════════════════════════════════
 FEDPROX_MU = 0.01  # proximal regularization strength
+NUM_FL_ROUNDS = 5  # number of federated rounds for FedAvg/FedProx
 
 
 def train_model_fedprox(model, dataloader, global_state_dict, mu=FEDPROX_MU, epochs=EPOCHS, label=""):
@@ -397,12 +408,12 @@ def train_model_fedprox(model, dataloader, global_state_dict, mu=FEDPROX_MU, epo
             opt.zero_grad(set_to_none=True)
             with torch.autocast(device_type="cuda", dtype=AMP_DTYPE, enabled=USE_AMP):
                 loss = crit(model(x), y)
-                # Proximal term (inside autocast)
-                prox = 0.0
-                for name, param in model.named_parameters():
-                    if name in global_on_device:
-                        prox += ((param - global_on_device[name]) ** 2).sum()
-                loss += (mu / 2.0) * prox
+            # Proximal term in full precision (bf16 mantissa too small for squared diffs)
+            prox = sum(
+                ((p.float() - global_on_device[n].float()) ** 2).sum()
+                for n, p in model.named_parameters() if n in global_on_device
+            )
+            loss = loss.float() + (mu / 2.0) * prox
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -594,6 +605,53 @@ def print_gas_cost_table():
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Participation Bonus Sensitivity Analysis
+# ═══════════════════════════════════════════════════════════════════════════
+def print_participation_sensitivity(confidence=8500, ece=1000):
+    """
+    Print weight vs rounds_participated for each capacity class at fixed
+    confidence/ECE. Shows how participation bonus interacts with capacity.
+    """
+    max_rounds = NUM_FL_ROUNDS + 1
+
+    print(f"\n{'='*80}")
+    print(f"  PARTICIPATION BONUS SENSITIVITY (conf={confidence}, ece={ece})")
+    print(f"{'='*80}")
+    print(f"  {'Rounds':<10}", end="")
+    for cap in CAPACITY_CLASSES:
+        print(f" {cap:>10}", end="")
+    print(f" {'Weak-Strong Gap':>16}")
+    print(f"  {'-'*10}", end="")
+    for _ in CAPACITY_CLASSES:
+        print(f" {'-'*10}", end="")
+    print(f" {'-'*16}")
+
+    for r in range(max_rounds):
+        print(f"  {r:<10}", end="")
+        weights = {}
+        for cap in CAPACITY_CLASSES:
+            w = compute_weight(cap, confidence, ece, rounds_participated=r)
+            weights[cap] = w
+            print(f" {w:>10}", end="")
+        gap = weights["Strong"] - weights["Weak"]
+        print(f" {gap:>16}")
+
+    print()
+
+    # Dropout comparison: Weak 5/5 vs Strong 3/5
+    print(f"  DROPOUT SCENARIO: Weak attends all {NUM_FL_ROUNDS} rounds, Strong attends 3/{NUM_FL_ROUNDS}")
+    w_weak  = compute_weight("Weak",   confidence, ece, rounds_participated=NUM_FL_ROUNDS)
+    w_strong = compute_weight("Strong", confidence, ece, rounds_participated=3)
+    w_weak_r1  = compute_weight("Weak",   confidence, ece, rounds_participated=1)
+    w_strong_r1 = compute_weight("Strong", confidence, ece, rounds_participated=1)
+    print(f"    Round 1 (both attend):   Weak={w_weak_r1:>6}  Strong={w_strong_r1:>6}  gap={w_strong_r1 - w_weak_r1}")
+    print(f"    Final  (dropout):        Weak={w_weak:>6}  Strong={w_strong:>6}  gap={w_strong - w_weak}")
+    print(f"    Gap narrowed by {(w_strong_r1 - w_weak_r1) - (w_strong - w_weak)} points")
+    print(f"    -> Reliable Weak hospital closes {((w_strong_r1 - w_weak_r1) - (w_strong - w_weak)) / (w_strong_r1 - w_weak_r1) * 100:.0f}% of the capacity gap through participation")
+    print()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Single Experiment Run
 # ═══════════════════════════════════════════════════════════════════════════
 def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_classes, epochs=EPOCHS):
@@ -646,28 +704,35 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
             best_local_acc = acc
             results["Local-Best"] = {"acc": acc, "f1": f1, "ece": ece}
 
-    # ── 3. FedAvg (uniform ResNet-50, param averaging) ────────────────────
+    # ── 3. FedAvg (uniform ResNet-50, multi-round param averaging) ──────
     print("    [3/7] FedAvg training...")
-    fedavg_models = []
-    for h in range(NUM_HOSPITALS):
-        m = get_model("Strong", num_classes)
-        train_model(m, hospital_loaders[h], epochs=epochs, label=f"FedAvg-H{h}")
-        fedavg_models.append(m)
-    global_model = fedavg(fedavg_models)
+    hospital_sizes = [len(ds) for ds in hospital_datasets]
+    fl_rounds = min(NUM_FL_ROUNDS, epochs)
+    epochs_per_round = max(1, epochs // fl_rounds)
+    global_model = get_model("Strong", num_classes)
+    for fl_round in range(fl_rounds):
+        local_models_fa = []
+        for h in range(NUM_HOSPITALS):
+            m = copy.deepcopy(global_model)
+            train_model(m, hospital_loaders[h], epochs=epochs_per_round,
+                        label=f"FedAvg-R{fl_round+1}-H{h}")
+            local_models_fa.append(m)
+        global_model = fedavg(local_models_fa, data_sizes=hospital_sizes)
     results["FedAvg"] = dict(zip(("acc", "f1", "ece"), evaluate_model(global_model, test_loader)))
 
-    # ── 3b. FedProx (uniform ResNet-50, proximal term) ─────────────────
+    # ── 3b. FedProx (uniform ResNet-50, multi-round with proximal term) ─
     print("    [4/7] FedProx training...")
-    global_init = get_model("Strong", num_classes)
-    global_state = copy.deepcopy(global_init.state_dict())
-    fedprox_models = []
-    for h in range(NUM_HOSPITALS):
-        m = get_model("Strong", num_classes)
-        m.load_state_dict(copy.deepcopy(global_state))
-        train_model_fedprox(m, hospital_loaders[h], global_state, mu=FEDPROX_MU, epochs=epochs, label=f"FedProx-H{h}")
-        fedprox_models.append(m)
-    fedprox_global = fedavg(fedprox_models)
-    results["FedProx"] = dict(zip(("acc", "f1", "ece"), evaluate_model(fedprox_global, test_loader)))
+    global_model_prox = get_model("Strong", num_classes)
+    for fl_round in range(fl_rounds):
+        global_state = copy.deepcopy(global_model_prox.state_dict())
+        local_models_fp = []
+        for h in range(NUM_HOSPITALS):
+            m = copy.deepcopy(global_model_prox)
+            train_model_fedprox(m, hospital_loaders[h], global_state, mu=FEDPROX_MU,
+                                epochs=epochs_per_round, label=f"FedProx-R{fl_round+1}-H{h}")
+            local_models_fp.append(m)
+        global_model_prox = fedavg(local_models_fp, data_sizes=hospital_sizes)
+    results["FedProx"] = dict(zip(("acc", "f1", "ece"), evaluate_model(global_model_prox, test_loader)))
 
     # ── 3c. FedMD (heterogeneous KD via public data) ───────────────────
     print("    [5/7] FedMD training...")
@@ -708,34 +773,71 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
         evaluate_ensemble(local_models, eq_weights, test_loader, num_classes),
     ))
 
-    # ── 5. Ours (full capacity-aware weights) ─────────────────────────────
-    reliability = []
-    for h in range(NUM_HOSPITALS):
-        conf_int, ece_int = get_reliability_metrics(local_models[h], val_loader)
-        reliability.append((conf_int, ece_int))
+    # ── 5. Ours (multi-round, full capacity-aware weights) ──────────────
+    # Start from fresh models (same budget as FedAvg/FedProx)
+    ours_models = [get_model(CAPACITY_CLASSES[h], num_classes) for h in range(NUM_HOSPITALS)]
+    rounds_participated = [0] * NUM_HOSPITALS
+    reliability = [(0, 0)] * NUM_HOSPITALS
+
+    for fl_round in range(fl_rounds):
+        for h in range(NUM_HOSPITALS):
+            train_model(ours_models[h], hospital_loaders[h], epochs=epochs_per_round,
+                        label=f"Ours-R{fl_round+1}-{CAPACITY_CLASSES[h]}")
+            rounds_participated[h] += 1
+            conf_int, ece_int = get_reliability_metrics(ours_models[h], val_loader)
+            reliability[h] = (conf_int, ece_int)
 
     our_weights = []
     for h in range(NUM_HOSPITALS):
         conf_int, ece_int = reliability[h]
-        w = compute_weight(CAPACITY_CLASSES[h], conf_int, ece_int, rounds_participated=1)
+        w = compute_weight(CAPACITY_CLASSES[h], conf_int, ece_int,
+                           rounds_participated=rounds_participated[h])
         our_weights.append(w)
 
     results["Ours"] = dict(zip(
         ("acc", "f1", "ece"),
-        evaluate_ensemble(local_models, [float(w) for w in our_weights], test_loader, num_classes),
+        evaluate_ensemble(ours_models, [float(w) for w in our_weights], test_loader, num_classes),
     ))
 
-    # ── 6-9. Ablations (weight formula variants, reuse local_models) ──────
+    # ── 5b. Ours-Dropout (realistic participation: Weak=100%, Med=80%, Strong=60%)
+    rng_dropout = np.random.default_rng(seed)
+    dropout_models = [get_model(CAPACITY_CLASSES[h], num_classes) for h in range(NUM_HOSPITALS)]
+    dropout_rounds = [0] * NUM_HOSPITALS
+    dropout_reliability = [(0, 0)] * NUM_HOSPITALS
+
+    for fl_round in range(fl_rounds):
+        for h in range(NUM_HOSPITALS):
+            cap = CAPACITY_CLASSES[h]
+            if rng_dropout.random() < PARTICIPATION_RATES[cap]:
+                train_model(dropout_models[h], hospital_loaders[h], epochs=epochs_per_round,
+                            label=f"Dropout-R{fl_round+1}-{cap}")
+                dropout_rounds[h] += 1
+                conf_int, ece_int = get_reliability_metrics(dropout_models[h], val_loader)
+                dropout_reliability[h] = (conf_int, ece_int)
+
+    dropout_weights = []
+    for h in range(NUM_HOSPITALS):
+        conf_int, ece_int = dropout_reliability[h]
+        w = compute_weight(CAPACITY_CLASSES[h], conf_int, ece_int,
+                           rounds_participated=dropout_rounds[h])
+        dropout_weights.append(w)
+
+    results["Ours-Dropout"] = dict(zip(
+        ("acc", "f1", "ece"),
+        evaluate_ensemble(dropout_models, [float(w) for w in dropout_weights], test_loader, num_classes),
+    ))
+
+    # ── 6-9. Ablations (weight formula variants, reuse ours_models) ───────
     for abl_name, abl_flags in ABLATIONS.items():
         abl_weights = []
         for h in range(NUM_HOSPITALS):
             conf_int, ece_int = reliability[h]
             w = compute_weight(CAPACITY_CLASSES[h], conf_int, ece_int,
-                               rounds_participated=1, **abl_flags)
+                               rounds_participated=rounds_participated[h], **abl_flags)
             abl_weights.append(w)
         results[f"Abl:{abl_name}"] = dict(zip(
             ("acc", "f1", "ece"),
-            evaluate_ensemble(local_models, [float(w) for w in abl_weights], test_loader, num_classes),
+            evaluate_ensemble(ours_models, [float(w) for w in abl_weights], test_loader, num_classes),
         ))
 
     # ── 10. No-PoC ablation (uniform arch, equal cap_mul) ─────────────────
@@ -769,7 +871,7 @@ def compute_stats(runs):
     stats = {}
     for metric in ("acc", "f1", "ece"):
         vals = [r[metric] for r in runs]
-        stats[metric] = (np.mean(vals), np.std(vals))
+        stats[metric] = (np.mean(vals), np.std(vals, ddof=1) if len(vals) > 1 else 0.0)
     return stats
 
 
@@ -784,7 +886,7 @@ def fmt(mean, std):
 def print_main_table(all_stats, dataset_name, noniid_key):
     """Print the main comparison table for one (dataset, noniid) combo."""
     methods_order = [
-        "Centralized", "Ours", "EqualWt-Ens", "FedMD", "FedAvg", "FedProx",
+        "Centralized", "Ours", "Ours-Dropout", "EqualWt-Ens", "FedMD", "FedAvg", "FedProx",
         "Local-Best", "Local-Weak", "Local-Medium", "Local-Strong",
     ]
 
@@ -830,7 +932,7 @@ def print_ablation_table(all_stats, dataset_name, noniid_key):
 
 def print_noniid_comparison(stats_by_level, dataset_name):
     """Print accuracy across non-IID severity levels for key methods."""
-    methods = ["Centralized", "Ours", "EqualWt-Ens", "FedMD", "FedAvg", "FedProx", "Local-Best"]
+    methods = ["Centralized", "Ours", "Ours-Dropout", "EqualWt-Ens", "FedMD", "FedAvg", "FedProx", "Local-Best"]
 
     print(f"\n{'='*80}")
     print(f"  NON-IID SEVERITY COMPARISON | {dataset_name.upper()}")
@@ -949,23 +1051,25 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
         DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, **dl_kwargs) for ds in hospital_datasets
     ]
 
-    # ── Honest baseline (reuse from main results if available) ─────────
-    # Train all 3 hospitals honestly
-    print("    [adv] Training honest baseline...")
-    honest_models = []
-    honest_reliability = []
-    for h in range(NUM_HOSPITALS):
-        cap = CAPACITY_CLASSES[h]
-        m = get_model(cap, num_classes)
-        train_model(m, hospital_loaders[h], epochs=epochs, label=f"Honest-{cap}")
-        honest_models.append(m)
-        conf_int, ece_int = get_reliability_metrics(m, val_loader)
-        honest_reliability.append((conf_int, ece_int))
+    # ── Honest baseline (multi-round, matching main experiment's "Ours") ─
+    print("    [adv] Training honest baseline (multi-round)...")
+    adv_fl_rounds = min(NUM_FL_ROUNDS, epochs)
+    adv_epochs_per_round = max(1, epochs // adv_fl_rounds)
+    honest_models = [get_model(CAPACITY_CLASSES[h], num_classes) for h in range(NUM_HOSPITALS)]
+    honest_reliability = [(0, 0)] * NUM_HOSPITALS
+
+    for fl_round in range(adv_fl_rounds):
+        for h in range(NUM_HOSPITALS):
+            cap = CAPACITY_CLASSES[h]
+            train_model(honest_models[h], hospital_loaders[h], epochs=adv_epochs_per_round,
+                        label=f"Honest-R{fl_round+1}-{cap}")
+            conf_int, ece_int = get_reliability_metrics(honest_models[h], val_loader)
+            honest_reliability[h] = (conf_int, ece_int)
 
     honest_weights = []
     for h in range(NUM_HOSPITALS):
         c, e = honest_reliability[h]
-        honest_weights.append(compute_weight(CAPACITY_CLASSES[h], c, e, rounds_participated=1))
+        honest_weights.append(compute_weight(CAPACITY_CLASSES[h], c, e, rounds_participated=adv_fl_rounds))
 
     eq_w = [1.0 / NUM_HOSPITALS] * NUM_HOSPITALS
 
@@ -993,7 +1097,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     lazy_weights = []
     for h in range(NUM_HOSPITALS):
         c, e = lazy_reliability[h]
-        lazy_weights.append(compute_weight(CAPACITY_CLASSES[h], c, e, rounds_participated=1))
+        lazy_weights.append(compute_weight(CAPACITY_CLASSES[h], c, e, rounds_participated=adv_fl_rounds))
 
     results["Lazy (Ours)"] = dict(zip(("acc", "f1", "ece"),
         evaluate_ensemble(lazy_models, [float(w) for w in lazy_weights], test_loader, num_classes)))
@@ -1009,7 +1113,7 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
     inflated_weights = []
     for h in range(NUM_HOSPITALS):
         c, e = inflated_reliability[h]
-        inflated_weights.append(compute_weight(CAPACITY_CLASSES[h], c, e, rounds_participated=1))
+        inflated_weights.append(compute_weight(CAPACITY_CLASSES[h], c, e, rounds_participated=adv_fl_rounds))
 
     # Uses lazy_models (bad model at index 2) but with inflated weights
     results["Inflated (Ours)"] = dict(zip(("acc", "f1", "ece"),
@@ -1042,11 +1146,11 @@ def run_adversarial_experiment(dataset_name, noniid_key, seed,
         if h == 2:
             # Cheater gets Strong multiplier
             spoof_weights_no_poc.append(
-                compute_weight("Strong", spoof_conf, spoof_ece, rounds_participated=1))
+                compute_weight("Strong", spoof_conf, spoof_ece, rounds_participated=adv_fl_rounds))
         else:
             c, e = honest_reliability[h]
             spoof_weights_no_poc.append(
-                compute_weight(CAPACITY_CLASSES[h], c, e, rounds_participated=1))
+                compute_weight(CAPACITY_CLASSES[h], c, e, rounds_participated=adv_fl_rounds))
 
     results["Spoofed (no PoC)"] = dict(zip(("acc", "f1", "ece"),
         evaluate_ensemble(spoof_models, [float(w) for w in spoof_weights_no_poc], test_loader, num_classes)))
@@ -1168,7 +1272,11 @@ def main():
         with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                completed.add((row["dataset"], row["noniid"], int(row["seed"])))
+                try:
+                    seed_val = int(row["seed"])
+                    completed.add((row["dataset"], row["noniid"], seed_val))
+                except ValueError:
+                    pass  # adversarial rows have non-integer seeds like "adv_42"
         print(f"Resuming: {len(completed)} (dataset, noniid, seed) combos already done")
 
     print(f"Device:   {DEVICE}  |  AMP: {USE_AMP}  |  Batch: {BATCH_SIZE}  |  Workers: {NUM_WORKERS}")
@@ -1202,7 +1310,11 @@ def main():
                         reader = csv.DictReader(f)
                         result = {}
                         for row in reader:
-                            if row["dataset"] == dataset_name and row["noniid"] == noniid_key and int(row["seed"]) == seed:
+                            try:
+                                row_seed = int(row["seed"])
+                            except ValueError:
+                                continue  # skip adversarial rows like "adv_42"
+                            if row["dataset"] == dataset_name and row["noniid"] == noniid_key and row_seed == seed:
                                 result[row["method"]] = {"acc": float(row["accuracy"]), "f1": float(row["f1_score"]), "ece": float(row["ece"])}
                     for method, metrics in result.items():
                         seed_results[method].append(metrics)
@@ -1242,6 +1354,7 @@ def main():
     first_ds_info = DATASET_REGISTRY[args.datasets[0]]
     print_communication_cost_table(first_ds_info["num_classes"])
     print_gas_cost_table()
+    print_participation_sensitivity()
 
     # ── Adversarial / Cheating Experiments ────────────────────────────────
     for dataset_name in args.datasets:

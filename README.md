@@ -177,15 +177,18 @@ Written in Solidity 0.8.24, deployed on a local Hardhat network.
 | **Centralized** | ResNet-50 trained on all pooled data (upper bound) |
 | **Local-Best** | Best single-hospital model by accuracy |
 | **Local-Weak/Medium/Strong** | Individual hospital models |
-| **FedAvg** | All hospitals train ResNet-50, average parameters |
-| **FedProx** | FedAvg + proximal regularization term `(mu/2) * \|\|w - w_global\|\|^2` |
+| **FedAvg** | Multi-round FL: all hospitals train ResNet-50, data-proportional parameter averaging, 5 rounds |
+| **FedProx** | Multi-round FedAvg + proximal regularization term `(mu/2) * \|\|w - w_global\|\|^2`, 5 rounds |
 | **FedMD** | Heterogeneous knowledge distillation via public dataset consensus logits |
 | **EqualWt-Ens** | 3 capacity-assigned models, uniform weights (1/3 each) |
-| **Ours** | 3 capacity-assigned models, on-chain capacity-aware weights |
+| **Ours** | 3 capacity-assigned models, multi-round training, on-chain capacity-aware weights with participation bonus |
+| **Ours-Dropout** | Same as Ours but with realistic dropout (Weak=100%, Medium=80%, Strong=60% per-round attendance) |
 
-### FedProx Baseline
+### FedAvg / FedProx Baselines
 
-FedProx extends FedAvg by adding a proximal term to each hospital's local objective, penalizing deviation from the global model. This helps stabilize training under non-IID data. All hospitals train ResNet-50 (homogeneous), with `mu = 0.01`:
+Both FedAvg and FedProx run as proper multi-round federated learning (5 rounds). Each round: the global model is distributed to all hospitals, each hospital trains locally for `epochs // 5` epochs, then local models are aggregated using data-proportional weighting (`n_k / sum(n_k)`). The total compute budget (epochs) is the same across all methods for fair comparison.
+
+FedProx adds a proximal term penalizing deviation from the global model (`mu = 0.01`):
 
 ```
 loss = CrossEntropy(pred, label) + (mu / 2) * ||w_local - w_global||^2
@@ -210,13 +213,21 @@ FedMD (Federated Model Distillation) supports heterogeneous architectures like o
 | No Bonus | Participation bonus disabled |
 | No PoC | All hospitals train EfficientNet-B0, uniform capacity multiplier |
 
+### Participation Bonus Analysis
+
+The experiment includes a sensitivity analysis showing how the participation bonus interacts with capacity class across rounds. A weight-vs-rounds table is generated at fixed confidence/ECE, demonstrating:
+
+- The participation bonus (capped at +2,500) partially compensates for lower capacity multipliers
+- In the **dropout scenario** (Weak=100% attendance, Strong=60%), a reliable Weak hospital narrows the weight gap against an unreliable Strong hospital
+- This validates the on-chain bonus mechanism as an incentive for consistent participation
+
 ### Adversarial Experiments
 
 Three attack scenarios test the robustness of the on-chain coordination:
 
 | Scenario | Description | Expected Outcome |
 |---|---|---|
-| **Lazy Hospital** | One hospital submits a random (untrained) model with honest metrics | On-chain weights naturally downweight it due to low confidence and high ECE |
+| **Lazy Hospital** | One hospital barely trains (1 epoch) and submits honest metrics | On-chain weights naturally downweight it due to low confidence and high ECE |
 | **Inflated Metrics** | One hospital submits a bad model but lies about confidence (max) and ECE (zero) | Ensemble accuracy degrades -- motivates need for metric verification |
 | **Capacity Spoofing** | A weak hospital claims strong capacity to get a heavier model | Without PoC: mismatch hurts ensemble. With PoC: contract rejects the registration via signature verification |
 
