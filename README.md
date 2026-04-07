@@ -10,7 +10,7 @@ This project addresses both problems:
 
 1. **Capacity-aware model assignment** -- A Proof of Capacity benchmark classifies each hospital node as Weak, Medium, or Strong, then assigns an architecture sized to its hardware (MobileNet, EfficientNet-B0, or ResNet-50).
 2. **Ensemble prediction instead of parameter aggregation** -- Since each hospital trains a different architecture, predictions are combined via weighted softmax averaging rather than weight averaging.
-3. **On-chain weight computation** -- Aggregation weights are computed deterministically on an Ethereum smart contract using capacity class, model confidence, calibration error (ECE), and participation history. This ensures transparency and auditability.
+3. **Deterministic weight formula** -- Aggregation weights are computed using a fixed-point formula based on capacity class, model confidence, calibration error (ECE), and participation history. The formula is implemented both in the Solidity smart contract (for on-chain transparency and auditability) and mirrored in Python (for experiment evaluation). Both implementations produce identical results.
 
 ## System Architecture
 
@@ -95,7 +95,7 @@ ChainLearn/
 |   |-- contracts/
 |   |   |-- FLCoordinator.sol       # Solidity smart contract
 |   |-- test/
-|   |   |-- FLCoordinator.test.js   # 47 Hardhat/Chai tests
+|   |   |-- FLCoordinator.test.js   # 59 Hardhat/Chai tests
 |   |-- hardhat.config.js
 |   |-- package.json
 |
@@ -158,7 +158,7 @@ Written in Solidity 0.8.24, deployed on a local Hardhat network.
 
 ### Test Coverage
 
-47 tests covering:
+59 tests covering:
 - Hospital registration and PoC signature verification
 - Round lifecycle and submission validation
 - Weight calculation across all capacity classes
@@ -180,7 +180,7 @@ Written in Solidity 0.8.24, deployed on a local Hardhat network.
 | **FedAvg** | Multi-round FL: all hospitals train ResNet-50, data-proportional parameter averaging, 5 rounds |
 | **FedProx** | Multi-round FedAvg + proximal regularization term `(mu/2) * \|\|w - w_global\|\|^2`, 5 rounds |
 | **FedMD** | Heterogeneous knowledge distillation via public dataset consensus logits |
-| **EqualWt-Ens** | 3 capacity-assigned models, uniform weights (1/3 each) |
+| **EqualWt-Ens** | Same multi-round trained models as Ours, but with uniform weights (1/3 each) |
 | **Ours** | 3 capacity-assigned models, multi-round training, on-chain capacity-aware weights with participation bonus |
 | **Ours-Dropout** | Same as Ours but with realistic dropout (Weak=100%, Medium=80%, Strong=60% per-round attendance) |
 
@@ -199,8 +199,8 @@ loss = CrossEntropy(pred, label) + (mu / 2) * ||w_local - w_global||^2
 FedMD (Federated Model Distillation) supports heterogeneous architectures like our method. It works by:
 1. Splitting 10% of training data as a shared public dataset.
 2. Each hospital trains its capacity-assigned model on its private shard.
-3. All models compute logits on the public dataset; these are averaged into consensus logits.
-4. Each model distills the consensus via KL divergence on the public set (temperature = 3.0).
+3. All models compute softmax probabilities on the public dataset (temperature = 3.0); these are averaged into consensus probabilities.
+4. Each model distills the consensus via KL divergence on the public set.
 5. Final prediction is an equal-weight ensemble of the distilled models.
 
 ### Ablation Studies
@@ -229,7 +229,7 @@ Three attack scenarios test the robustness of the on-chain coordination:
 |---|---|---|
 | **Lazy Hospital** | One hospital barely trains (1 epoch) and submits honest metrics | On-chain weights naturally downweight it due to low confidence and high ECE |
 | **Inflated Metrics** | One hospital submits a bad model but lies about confidence (max) and ECE (zero) | Ensemble accuracy degrades -- motivates need for metric verification |
-| **Capacity Spoofing** | A weak hospital claims strong capacity to get a heavier model | Without PoC: mismatch hurts ensemble. With PoC: contract rejects the registration via signature verification |
+| **Capacity Spoofing** | A weak hospital claims strong capacity to get a heavier model | Without PoC: mismatch hurts ensemble. With PoC: the signed benchmark hash creates an auditable link between the hospital's identity and its claimed capacity, enabling detection of mismatches |
 
 ### Communication Cost Analysis
 
@@ -260,7 +260,7 @@ Gas costs measured from the Hardhat test suite (`FLCoordinator.test.js`) at 20 G
 
 ### Datasets
 
-- **PneumoniaMNIST** -- Chest X-rays, 2 classes (normal/pneumonia). 4,708 train / 524 val / 624 test images, resized from 28×28 to 224×224×3 for ImageNet-compatible backbones.
+- **PneumoniaMNIST** -- Chest X-rays, 2 classes (normal/pneumonia). 4,708 train images, with the official test split (624 images) divided 50/50 into 312 validation / 312 test. Validation is used for reliability metrics (confidence, ECE); test is used only for final evaluation. Resized from 28×28 to 224×224×3 for ImageNet-compatible backbones.
 
 Sourced from [MedMNIST](https://medmnist.com/). All paper results use PneumoniaMNIST only.
 
@@ -308,7 +308,7 @@ python simulation/experiment.py --noniid moderate severe
 cd smart_contracts
 npm install
 npx hardhat compile
-npx hardhat test          # 47 tests
+npx hardhat test          # 59 tests
 ```
 
 ### 2. Hospital Node (Python)
@@ -317,7 +317,7 @@ npx hardhat test          # 47 tests
 cd hospital_node
 python -m venv venv
 source venv/bin/activate   # Windows: venv\Scripts\activate
-pip install torch torchvision web3 eth-account medmnist scikit-learn numpy
+pip install torch torchvision web3 eth-account medmnist scikit-learn numpy tqdm python-dotenv
 ```
 
 ### 3. End-to-End Simulation
@@ -351,9 +351,10 @@ python generate_figures.py
 ### Python
 - Python 3.10+
 - PyTorch, torchvision
-- web3.py, eth-account
+- web3.py, eth-account, python-dotenv
 - medmnist, scikit-learn
-- numpy
+- numpy, tqdm
+- matplotlib (for figure generation)
 
 ### Node.js
 - Node.js 18+
@@ -365,7 +366,7 @@ python generate_figures.py
 1. **Ensemble over FedAvg** -- Heterogeneous architectures cannot be parameter-averaged. Softmax ensemble preserves the strengths of each architecture.
 2. **Fixed-point arithmetic** -- Solidity lacks floating-point. All percentages use SCALE = 10,000 (100% = 10000).
 3. **Weight cap at 15,000** -- Prevents any single hospital from dominating the ensemble (max 1.5x multiplier).
-4. **EIP-191 signatures** -- PoC benchmark results are signed by the hospital's private key and verified on-chain, ensuring benchmark identity (the contract confirms *who* signed, though not the truthfulness of the benchmark itself).
+4. **EIP-191 signatures** -- PoC benchmark results are signed by the hospital's private key and verified on-chain. The contract confirms *who* signed the benchmark hash, but the capacity class is a separate parameter set by the contract owner at registration. This means PoC provides an auditable identity link, not automatic capacity verification.
 5. **Model type enforcement** -- The contract rejects submissions where the model type doesn't match the hospital's assigned architecture, ensuring the capacity-aware design is respected.
 6. **Minimal communication** -- Only hashes and scalar metrics are sent on-chain (~224 bytes per hospital per round), compared to ~94 MB for FedAvg parameter sharing.
 7. **Quality-aware weighting** -- The weight formula naturally downweights low-confidence or poorly calibrated models when metrics are reported honestly. This provides a passive defense but does not verify metric truthfulness; adversarial experiments quantify the impact of dishonest reporting.
@@ -375,7 +376,7 @@ python generate_figures.py
 1. **Metrics are self-reported** -- Confidence and ECE are submitted by each hospital with no verification. Our adversarial experiments quantify the impact of dishonest reporting.
 2. **No data poisoning defense** -- A hospital can train on corrupted data while reporting honest metrics. Backdoor attacks that perform well on clean evaluation data are not detected.
 3. **Benchmark replay** -- A hospital could run PoC on rented hardware, obtain a "Strong" signature, then train on weaker hardware. The signed hash is valid but may not reflect current capability.
-4. **Gas costs are estimates** -- The experiment pipeline uses an equivalent Python weight computation rather than actual on-chain execution.
+4. **Experiments use Python-mirrored weights** -- The experiment pipeline computes weights using a Python function (`compute_weight`) that mirrors the Solidity `calculateWeightPure` formula exactly. Gas costs are estimated from Hardhat tests, not from actual on-chain experiment execution.
 
 ## Future Work
 

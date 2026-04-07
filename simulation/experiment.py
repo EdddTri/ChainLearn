@@ -765,16 +765,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
         evaluate_ensemble(fedmd_models, fedmd_eq, test_loader, num_classes),
     ))
 
-    # ── 4. Equal-weight ensemble (capacity-aware models) ──────────────────
-    print("    [6/7] Evaluating ensembles & ablations...")
-    eq_weights = [1.0 / NUM_HOSPITALS] * NUM_HOSPITALS
-    results["EqualWt-Ens"] = dict(zip(
-        ("acc", "f1", "ece"),
-        evaluate_ensemble(local_models, eq_weights, test_loader, num_classes),
-    ))
-
-    # ── 5. Ours (multi-round, full capacity-aware weights) ──────────────
-    # Start from fresh models (same budget as FedAvg/FedProx)
+    # ── 4. Ours (multi-round, full capacity-aware weights) ──────────────
+    print("    [6/7] Training Ours & evaluating ensembles...")
     ours_models = [get_model(CAPACITY_CLASSES[h], num_classes) for h in range(NUM_HOSPITALS)]
     rounds_participated = [0] * NUM_HOSPITALS
     reliability = [(0, 0)] * NUM_HOSPITALS
@@ -797,6 +789,13 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
     results["Ours"] = dict(zip(
         ("acc", "f1", "ece"),
         evaluate_ensemble(ours_models, [float(w) for w in our_weights], test_loader, num_classes),
+    ))
+
+    # ── 4b. Equal-weight ensemble (same models as Ours, equal weights) ───
+    eq_weights = [1.0 / NUM_HOSPITALS] * NUM_HOSPITALS
+    results["EqualWt-Ens"] = dict(zip(
+        ("acc", "f1", "ece"),
+        evaluate_ensemble(ours_models, eq_weights, test_loader, num_classes),
     ))
 
     # ── 5b. Ours-Dropout (realistic participation: Weak=100%, Med=80%, Strong=60%)
