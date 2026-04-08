@@ -851,7 +851,7 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
     for h in range(NUM_HOSPITALS):
         conf_int, ece_int = get_reliability_metrics(nopoc_models[h], val_loader)
         w = compute_weight(CAPACITY_CLASSES[h], conf_int, ece_int,
-                           rounds_participated=1, use_capacity=False)
+                           rounds_participated=fl_rounds, use_capacity=False)
         nopoc_weights.append(w)
 
     results["Abl:No PoC"] = dict(zip(
