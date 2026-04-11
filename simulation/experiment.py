@@ -56,7 +56,7 @@ from medmnist import PneumoniaMNIST, DermaMNIST
 
 # ── Config ─────────────────────────────────────────────────────────────────
 EPOCHS     = 15
-BATCH_SIZE = 512 if torch.cuda.is_available() else 32
+BATCH_SIZE = 32
 LR         = 0.001
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
 NUM_WORKERS = 16 if torch.cuda.is_available() else 0
@@ -124,7 +124,7 @@ def load_dataset(name):
         transforms.ToTensor(),
         transforms.Resize((224, 224), antialias=True),
         transforms.Lambda(lambda x: x.repeat(3, 1, 1) if x.shape[0] == 1 else x),
-        transforms.Normalize([0.5]*3, [0.5]*3),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
     ])
 
     data_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -201,15 +201,15 @@ def dirichlet_split(dataset, num_classes, alpha, seed):
 #  Model Factory
 # ═══════════════════════════════════════════════════════════════════════════
 def get_model(capacity_class, num_classes):
-    """Return the architecture assigned to a capacity class."""
+    """Return the architecture assigned to a capacity class (ImageNet-pretrained)."""
     if capacity_class == "Weak":
-        m = models.mobilenet_v3_small(weights=None)
+        m = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1)
         m.classifier[-1] = nn.Linear(m.classifier[-1].in_features, num_classes)
     elif capacity_class == "Medium":
-        m = models.efficientnet_b0(weights=None)
+        m = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
         m.classifier[-1] = nn.Linear(m.classifier[-1].in_features, num_classes)
     else:  # Strong
-        m = models.resnet50(weights=None)
+        m = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         m.fc = nn.Linear(m.fc.in_features, num_classes)
     m = m.to(DEVICE)
     if torch.cuda.is_available():

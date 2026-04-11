@@ -1,0 +1,1313 @@
+ChainLearn: A Blockchain-Based Capacity-Aware
+Framework for Federated Ensemble Learning
+Karan Sharma
+DA-IICT
+Gandhinagar, India
+202318018@dau.ac.in
+Aditya Tripathi
+DA-IICT
+Gandhinagar, India
+202318046@dau.ac.in
+Rahul Mishra
+IIT Patna
+Patna, India
+rahul mishra@iitp.ac.in
+Tapas Kumar Maiti
+DA-IICT
+Gandhinagar, India
+tapas kumar@dau.ac.in
+Abstract—Federated learning is increasingly adopted in med-
+ical imaging environments where privacy constraints prohibit
+centralized data collection, yet most practical federated al-
+gorithms assume homogeneous participant hardware, identical
+model architectures, and centrally trusted aggregation. These
+assumptions become restrictive when collaborating institutions
+possess unequal computational resources and cannot sustain
+identical neural network backbones. This work presents a
+capacity-aware federated learning coordination framework in
+which participating hospitals are assigned heterogeneous model
+architectures according to measured local compute through-
+put and coordinated through a blockchain-defined policy layer.
+Rather than enforcing parameter-space compatibility, the system
+performs weighted ensemble inference across heterogeneous local
+models, enabling lightweight and high-capacity institutions to
+jointly participate without architectural homogenization.
+The proposed design separates on-chain coordination from
+off-chain model execution. A Solidity smart contract stores
+hospital registration metadata, signed benchmark hashes, per-
+round scalar reliability submissions, and deterministic aggrega-
+tion weights derived from declared capacity class, confidence,
+calibration error, and participation history. Local hospitals
+train architecture-specific convolutional networks selected from
+MobileNetV3-Small, EfficientNet-B0, and ResNet-50, submit only
+model hashes and scalar metrics, and retain all model parameters
+off chain. Final inference is executed off chain through weighted
+probability aggregation.
+The implementation targets privacy-preserving medical image
+classification using PneumoniaMNIST and DermaMNIST and
+compares the proposed method against centralized training, local-
+only baselines, FedAvg, FedProx, FedMD, equal-weight ensem-
+bling, a dropout-aware variant, and multiple ablations under
+controlled non-IID partitions. Across five random seeds and three
+non-IID severity levels on both datasets, the proposed method
+consistently achieves lower calibration error than equal-weight
+ensembling and competitive accuracy against all federated base-
+lines, while reducing per-round coordination payload from 204
+MB (FedAvg) to 224 bytes—a reduction of over 900,000×. Cur-
+rent prototype limitations include self-reported reliability metrics
+and heuristic benchmark attestation. The primary contribution
+is therefore an auditable heterogeneous federated coordination
+architecture rather than a cryptographically complete proof-of-
+capacity system or a new federated optimization algorithm.
+Index Terms—Federated Learning, Blockchain Coordination,
+Heterogeneous Systems, Medical Image Classification, Ensemble
+Aggregation, Smart Contracts, Calibration Error
+I. INTRODUCTION
+Federated learning has become a central paradigm for col-
+laborative machine learning in domains where raw data cannot
+be centrally aggregated. In healthcare systems, this constraint
+is especially strong because clinical imaging repositories are
+protected by institutional governance, privacy regulation, and
+operational policy. Hospitals often possess diagnostically valu-
+able local datasets but cannot directly exchange patient images,
+motivating decentralized optimization in which local models
+are trained independently and periodically coordinated through
+aggregation.
+The majority of practical federated learning systems, how-
+ever, remain built around an implicit homogeneity assumption:
+all participants train identical architectures under approxi-
+mately comparable computational conditions. In canonical
+parameter-averaging frameworks such as FedAvg, local model
+tensors must share identical dimensional structure for aggre-
+gation to remain valid. This assumption is difficult to satisfy
+in realistic hospital networks. A tertiary medical center may
+possess server-grade GPU infrastructure capable of sustaining
+deep residual architectures, while smaller institutions may
+operate under CPU-only constraints or lightweight edge en-
+vironments. Under such conditions, architecture uniformity
+either excludes weaker participants or underutilizes stronger
+ones.
+This mismatch creates a structural limitation in conventional
+federated optimization. If all participants must train the same
+network, the chosen architecture is determined by the weakest
+participant. If stronger institutions independently train larger
+models, standard parameter averaging becomes mathemati-
+cally invalid because tensor dimensions no longer align. The
+practical consequence is that heterogeneous compute environ-
+ments force a compromise between participation breadth and
+model expressiveness.
+This work addresses that limitation through a capacity-
+aware heterogeneous federated workflow in which model ar-
+chitecture selection is itself treated as a coordination variable.
+Instead of assuming identical local networks, participating
+hospitals are first benchmarked through a local throughput
+procedure and assigned one of three compute classes: weak,
+medium, or strong. Each class maps deterministically to
+a distinct convolutional backbone. Weak participants train
+MobileNetV3-Small, medium participants train EfficientNet-
+B0, and strong participants train ResNet-50. Because these ar-
+chitectures occupy incompatible parameter spaces, aggregation
+occurs not through weight averaging but through probability-
+
+-- 1 of 13 --
+
+space ensembling.
+The second challenge concerns coordination trust. Tradi-
+tional federated learning relies on a centralized aggregator
+that determines round participation, receives local updates,
+and applies aggregation policy. Such a design centralizes
+authority over participation semantics and leaves weighting
+logic externally opaque. In this repository, coordination policy
+is encoded in a blockchain smart contract implemented in
+Solidity. The contract stores hospital registration state, signed
+benchmark hashes, declared capacity classes, scalar reliability
+metrics, and deterministic aggregation weights. Model tensors
+never appear on chain; only hashes and scalar metadata are
+recorded.
+This distinction is critical. The blockchain layer does not ex-
+ecute learning and does not perform inference. Instead, it acts
+as an auditable coordination substrate in which policy remains
+deterministic and externally inspectable. Hospitals submit
+model hashes, confidence estimates, expected calibration error,
+and architecture identifiers. The contract then applies a fixed-
+point arithmetic weighting rule combining capacity multiplier,
+calibration-adjusted confidence, and participation history. Final
+ensemble inference remains off chain, where local model
+outputs are combined through weighted probability averaging.
+The present system therefore contributes at the level of
+distributed coordination rather than optimization theory. It
+does not introduce a new gradient method, nor does it
+claim cryptographically secure proof-of-capacity attestation.
+The benchmark procedure currently binds a signed benchmark
+hash to hospital identity but does not allow the contract
+to verify throughput correctness. Similarly, scalar reliability
+metrics remain self-reported. Experimental evaluation further
+uses a Python mirror of the contract-defined weighting rule
+rather than live Solidity execution for the main research
+benchmarks. These distinctions are essential for claim-safe
+scientific interpretation.
+The strongest contribution of the work is thus an auditable
+heterogeneous federated coordination architecture with mini-
+mal on-chain metadata and deterministic policy semantics. The
+strongest limitation is that trust assumptions remain partially
+externalized.
+The contributions of this paper are threefold:
+1) We introduce a capacity-aware heterogeneous federated
+coordination workflow in which participants are as-
+signed distinct model architectures according to mea-
+sured local compute throughput, allowing institutions
+with unequal hardware resources to jointly participate
+without parameter-space compatibility requirements.
+2) We design a blockchain coordination layer that stores
+identity-bound submissions, enforces architecture-class
+consistency, and deterministically computes aggrega-
+tion weights from declared capacity, self-reported confi-
+dence, calibration error, and participation history while
+retaining all model parameters off chain.
+3) We implement a communication-minimal off-chain
+weighted ensemble strategy that aggregates heteroge-
+neous model outputs in probability space and evaluate
+it against multiple federated baselines under non-IID
+medical image classification settings.
+II. RELATED WORK
+A. Classical Federated Learning
+Federated learning emerged as a communication-efficient
+alternative to centralized distributed optimization by enabling
+local gradient computation while preserving data locality.
+The most widely adopted baseline remains FedAvg, in which
+local participants perform several gradient steps and transmit
+parameter tensors to a central aggregator for weighted aver-
+aging. Under homogeneous architectures and comparable data
+distributions, this approach remains highly effective.
+However, FedAvg depends fundamentally on parameter
+compatibility:
+θglobal =
+N	X
+i=1
+αiθi (1)
+where all θi must share identical tensor structure.
+This requirement becomes restrictive when clients differ in
+hardware capacity or model family selection. Even moderate
+architecture variation invalidates direct tensor aggregation.
+B. Federated Learning Under Heterogeneity
+Several extensions attempt to relax FedAvg assumptions
+under statistical or systems heterogeneity. FedProx introduces
+proximal regularization to stabilize local optimization under
+unequal participant behavior. This improves convergence when
+local objectives differ but still assumes compatible architec-
+tures.
+FedMD moves coordination into output space by exchang-
+ing consensus probabilities rather than model parameters. This
+permits heterogeneous models to share predictive information
+through temperature-scaled probability alignment rather than
+tensor averaging. The present work is conceptually closer to
+output-space coordination than parameter-space optimization,
+although it differs by introducing deterministic blockchain-
+defined weighting rather than distillation-driven consensus
+refinement.
+Unlike many heterogeneous FL methods that still assume
+centralized orchestration, the present system explicitly exter-
+nalizes policy into a smart contract.
+C. Blockchain-Based Federated Coordination
+Blockchain has been repeatedly proposed as a trust-
+reduction mechanism for federated learning, particularly for
+participant registration and immutable logging. Many prior
+systems, however, overextend blockchain responsibilities by
+implying on-chain model coordination at scales incompatible
+with realistic neural parameter sizes.
+A major practical weakness in much blockchain-FL litera-
+ture is excessive on-chain payload size. Large convolutional
+backbones cannot be economically stored on chain, and direct
+parameter exchange through smart contracts is computation-
+ally infeasible.
+
+-- 2 of 13 --
+
+The present design adopts a minimal metadata strategy:
+• benchmark hash,
+• model hash,
+• scalar confidence,
+• scalar calibration error,
+• architecture identifier.
+This reduces chain usage to deterministic policy storage
+rather than model transport.
+D. Federated Learning for Medical Imaging
+Medical imaging remains one of the most compelling do-
+mains for federated learning because privacy barriers strongly
+prohibit centralized pooling of patient scans. Yet hospital
+networks also exhibit strong infrastructure asymmetry. Large
+tertiary hospitals frequently possess significantly stronger
+compute than smaller institutions.
+This asymmetry creates exactly the heterogeneous deploy-
+ment environment that classical homogeneous FL does not
+naturally address. The present work therefore uses medical
+image classification not merely as a benchmark domain but as
+an operationally realistic heterogeneous coordination scenario.
+III. PROBLEM FORMULATION
+Let:
+H = {H1, H2, ..., HN } (2)
+denote a set of participating hospitals.
+Each hospital Hi possesses local private dataset:
+Di = {(xj , yj )}ni
+j=1 (3)
+and local compute capacity:
+ci ∈ {weak, medium, strong} (4)
+determined through benchmark throughput.
+A deterministic architecture mapping assigns:
+Ai = f (ci) (5)
+such that:
+weak → M obileN etV 3 (6)
+medium → Ef f icientN etB0 (7)
+strong → ResN et50 (8)
+Each hospital trains local model:
+Mi = T rain(Ai, Di) (9)
+and computes reliability tuple:
+Ri = (Ci, Ei, ri) (10)
+where:
+• Ci = average confidence
+• Ei = expected calibration error
+• ri = rounds participated
+The blockchain coordination function computes:
+Wi = g(ci, Ci, Ei, ri) (11)
+using fixed-point arithmetic.
+Because local parameter spaces differ:
+θi̸ = compatible(θj ) (12)
+aggregation occurs in probability space:
+P (x) =
+PN
+i=1 WiPi(x)
+PN
+i=1 Wi
+(13)
+where Pi(x) is local softmax output.
+The objective is therefore not classical federated conver-
+gence toward a single global parameter vector, but determin-
+istic coordination under architecture heterogeneity:
+maximize coordination quality under heterogeneous Ai
+(14)
+subject to:
+datai̸ → external (15)
+and:
+parametersi̸ → blockchain (16)
+IV. SYSTEM ARCHITECTURE
+The proposed framework is organized as a three-layer exe-
+cution architecture aligned with trust boundaries and runtime
+responsibilities. Rather than treating blockchain as a computa-
+tional substrate for machine learning, the design deliberately
+isolates heavy numerical learning from policy coordination.
+This separation is necessary because neural model execution
+remains computationally unsuitable for smart contract environ-
+ments, while coordination semantics benefit from deterministic
+externalization.
+The complete architecture consists of:
+1) an on-chain coordination and policy layer,
+2) an off-chain hospital execution layer,
+3) an experimental orchestration layer used for research
+evaluation.
+These layers correspond directly to the repository structure:
+• smart_contracts/
+• hospital_node/
+• simulation/
+This repository-level separation is not merely organiza-
+tional; it reflects distinct operational trust domains.
+
+-- 3 of 13 --
+
+A. On-Chain Coordination Layer
+The blockchain layer is implemented through the Solidity
+contract FLCoordinator. Its purpose is not to store models
+or execute inference, but to encode deterministic participation
+policy and persistent round metadata.
+The contract maintains four primary categories of state:
+• hospital registration metadata,
+• per-round submissions,
+• round submitter lists,
+• ensemble records.
+A hospital entry stores:
+Hi = (addri, namei, ci, registeredi, hi, Ci, Ei, ri) (17)
+where:
+• addri denotes Ethereum identity,
+• ci denotes declared capacity class,
+• hi denotes benchmark hash,
+• Ci denotes latest confidence,
+• Ei denotes latest calibration error,
+• ri denotes rounds participated.
+The contract therefore acts as a deterministic state machine
+rather than a federated optimizer.
+B. Off-Chain Hospital Layer
+Each hospital executes all computationally expensive oper-
+ations locally:
+• benchmark generation,
+• model training,
+• reliability computation,
+• model hashing,
+• blockchain transaction signing.
+This logic resides primarily in:
+• capacity_manager.py
+• blockchain_client.py
+• contract_integration.py
+The hospital layer therefore contains the full learning path,
+while the blockchain layer observes only scalar summaries.
+C. Experiment Layer
+The research evaluation layer introduces controlled bench-
+marking independent of live contract execution.
+This layer includes:
+• baseline training,
+• non-IID partition generation,
+• ablation analysis,
+• communication estimates,
+• gas estimates,
+• adversarial simulation.
+This layer is implemented across three scripts with distinct
+scopes:
+• experiment.py — comprehensive evaluation: seven
+baselines, five ablations, three non-IID levels, five seeds,
+adversarial scenarios, communication and gas cost anal-
+ysis. Mirrors contract weight logic in Python rather than
+invoking Solidity in every training loop.
+• run_simulation.py — end-to-end blockchain pro-
+tocol demonstration: starts a local Hardhat node, deploys
+FLCoordinator, registers hospitals with ECDSA-
+signed PoC hashes, runs multi-round training, submits
+updates on-chain, reads contract-computed weights, and
+records ensemble prediction hashes on-chain. Final en-
+semble is evaluated on a random tensor input (protocol
+correctness, not predictive quality).
+• simulate_federation.py — lightweight FedAvg
+protocol demonstration: simulates homogeneous feder-
+ated learning using a simple FederatedCNN on syn-
+thetic data partitions. Serves as a standalone protocol
+sanity check independent of the heterogeneous system.
+This distinction is critical: contract policy and research
+evaluation share identical arithmetic semantics but differ in
+runtime execution environment.
+V. SMART CONTRACT DESIGN AND COORDINATION
+SEMANTICS
+A. Contract State Model
+The Solidity implementation defines three principal structs:
+1) Hospital:
+Hospital = (address, name, capacityClass,
+isRegistered, pocHash, conf idence, ece, rounds)
+(18)
+This struct stores both registration metadata and evolving
+reliability state.
+2) Submission:
+Submission = (modelHash, conf idence,
+ece, timestamp, modelT ype) (19)
+A submission is round-scoped.
+3) EnsembleRecord:
+EnsembleRecord = (predictionHash,
+participantCount, timestamp) (20)
+The contract stores only opaque ensemble evidence rather
+than prediction tensors.
+B. Round State Machine
+The contract operates as a privileged owner-controlled round
+machine.
+The lifecycle follows:
+1) registration,
+2) round start,
+3) submission collection,
+4) weight query,
+5) ensemble recording.
+The owner invokes:
+
+-- 4 of 13 --
+
+startN ewRound() (21)
+Hospitals invoke:
+submitU pdate() (22)
+The aggregator later records:
+recordEnsembleP rediction() (23)
+This architecture is therefore partially decentralized:
+• participant submissions are decentralized,
+• round control remains owner-managed.
+Thus the correct characterization is:
+partially decentralized coordination
+rather than fully decentralized federated learning.
+C. Submission Constraints
+The contract enforces three strong participation constraints.
+1) Registered Identity Constraint: Only registered hospitals
+may submit:
+registeredi = true (24)
+2) Single Submission Constraint: Each hospital may submit
+once per round:
+submitted(Hi, r) = f alse (25)
+before submission.
+3) Model-Type Constraint: The declared model type must
+match assigned capacity.
+This creates deterministic architecture compliance:
+modelT ypei = f (capacityi) (26)
+This is one of the strongest enforceable semantics in the
+repository because architecture mismatch is rejected directly
+in Solidity.
+D. Fixed-Point Weight Computation
+The weight function is fully implemented in integer arith-
+metic.
+Contract constants are:
+SCALE = 10000 (27)
+M AX = 15000 (28)
+Capacity multipliers are:
+weak = 8000 (29)
+medium = 10000 (30)
+strong = 12000 (31)
+The deterministic weight is:
+Wi = MiCi(SCALE − Ei)
+SCALE2 + Bi (32)
+where:
+• Mi = capacity multiplier,
+• Ci = confidence,
+• Ei = expected calibration error,
+• Bi = participation bonus.
+E. Participation Bonus
+The contract includes explicit longitudinal weighting:
+Bi = min(500ri, 2500) (33)
+where ri is rounds participated.
+This means stable long-term participants accumulate deter-
+ministic reward.
+However, current experiments largely set:
+ri = 1 (34)
+Therefore longitudinal behavior remains designed but not
+deeply evaluated.
+F. Contract Guarantees and Non-Guarantees
+The contract guarantees:
+• identity-bound registration,
+• deterministic arithmetic,
+• architecture consistency,
+• duplicate prevention.
+The contract does not guarantee:
+• truthful benchmark throughput,
+• truthful reliability metrics,
+• truthful ensemble derivation.
+This distinction is essential.
+G. Benchmark Signature Limitation
+Registration verifies:
+recover(signature, hB ) = addri (35)
+but does not verify benchmark preimage semantics.
+Thus the current prototype binds benchmark hash to identity
+but does not cryptographically verify proof-of-capacity cor-
+rectness.
+The scientifically correct wording is therefore:
+identity-bound benchmark declaration
+not:
+proof-of-capacity attestation
+
+-- 5 of 13 --
+
+H. Ensemble Record Limitation
+The contract stores:
+predictionHash (36)
+and:
+participantCount (37)
+as externally supplied values.
+No contract-level verification exists that:
+• the hash derives from submitted models,
+• participant count matches actual contributors.
+Thus ensemble storage is audit metadata rather than proof
+of inference correctness.
+VI. CAPACITY-AWARE HOSPITAL PIPELINE
+A. Benchmark Procedure
+Local benchmarking is executed through a lightweight con-
+volutional proxy network:
+DummyN et (38)
+This benchmark uses:
+• one convolution layer,
+• one linear projection,
+• fixed SGD steps.
+Measured throughput is:
+Ti = samples
+time (39)
+Capacity thresholds are:
+Ti < 100 → weak (40)
+100 ≤ Ti < 300 → medium (41)
+Ti ≥ 300 → strong (42)
+B. Benchmark Interpretation Caveat
+Because DummyNet complexity is far smaller than ResNet-
+50 complexity, benchmark capacity should be interpreted as
+heuristic relative throughput rather than architecture-specific
+execution proof.
+The benchmark therefore approximates device class but
+does not strongly predict exact deep backbone efficiency.
+C. Benchmark Serialization and Signing
+Benchmark metadata is serialized through binary packing:
+pack(Ti, k, batch, ci) (43)
+Hashing follows:
+hB = SHA256(pack(...)) (44)
+Signing uses EIP-191.
+This provides deterministic serialization and identity-bound
+submission.
+D. Architecture Assignment
+Capacity maps deterministically to model family:
+weak → M obileN etV 3Small (45)
+medium → Ef f icientN etB0 (46)
+strong → ResN et50 (47)
+This deterministic mapping is central because Solidity later
+enforces architecture consistency through model-type submis-
+sion checks.
+E. Why Architecture Assignment Matters
+This mechanism solves a major federated systems issue:
+heterogeneous institutions need not converge to
+weakest-device architecture
+Instead, local capacity determines model expressiveness
+while coordination remains unified at inference time.
+VII. HOSPITAL TRAINING AND SUBMISSION WORKFLOW
+After registration, each hospital executes:
+1) local dataset loading,
+2) local training,
+3) reliability extraction,
+4) model hashing,
+5) blockchain submission.
+This produces tuple:
+(modelHashi, Ci, Ei, modelT ypei) (48)
+Only this tuple is transmitted.
+Thus local parameters remain private and off chain.
+This communication design is one of the strongest practical
+contributions of the repository.
+VIII. OFF-CHAIN AGGREGATION STRATEGY
+A. Why Parameter Averaging Is Inapplicable
+The proposed system intentionally assigns distinct neural
+architectures to different hospitals according to measured
+compute capacity. As a consequence, local parameter tensors
+no longer share compatible dimensional structure.
+For two participants Hi and Hj :
+θi̸ ≡ θj (49)
+when:
+Ai̸ = Aj (50)
+where Ai denotes local model architecture.
+Under these conditions, classical federated averaging:
+θglobal =
+N	X
+i=1
+αiθi (51)
+is undefined because layer dimensions differ.
+The repository therefore abandons parameter-space aggre-
+gation entirely in the heterogeneous path.
+
+-- 6 of 13 --
+
+B. Probability-Space Weighted Aggregation
+Instead of parameter merging, each hospital locally com-
+putes softmax probabilities:
+Pi(x) = sof tmax(Mi(x)) (52)
+for input sample x.
+The global prediction is:
+P (x) =
+PN
+i=1 WiPi(x)
+PN
+i=1 Wi
+(53)
+where Wi is the blockchain-defined deterministic weight.
+This design yields three immediate advantages:
+1) architecture independence,
+2) stable output dimensionality,
+3) no parameter exchange requirement.
+Because all local models target the same classification task,
+output space remains compatible even when parameter spaces
+differ.
+C. Aggregator Runtime Placement
+The ensemble computation is intentionally off chain.
+This is necessary because smart contract environments can-
+not economically execute:
+• tensor arithmetic,
+• softmax evaluation,
+• floating-point inference.
+The contract therefore defines policy while inference re-
+mains external.
+The scientifically correct characterization is:
+on-chain weight computation plus off-chain ensem-
+ble inference
+rather than:
+on-chain aggregation
+D. Current Demonstration Limitation
+The end-to-end simulation path implemented in
+run_simulation.py currently evaluates the final
+ensemble using:
+x ∼ random tensor (54)
+rather than a held-out validation or test batch.
+Thus this path demonstrates protocol execution only:
+registration, round flow, submission, weight query,
+ensemble recording
+but not final predictive quality.
+True predictive evaluation is instead performed in
+experiment.py.
+IX. EXPERIMENTAL METHODOLOGY
+A. Datasets
+Two medical imaging datasets from MedMNIST are used
+for evaluation.
+PneumoniaMNIST contains binary chest X-ray classifica-
+tion examples (normal/pneumonia). The training set contains
+4,708 images; the official test set of 624 images is divided
+50/50 into a validation split (312 images, used only for
+computing reliability metrics and aggregation weights) and a
+held-out test split (312 images, used only for final evaluation).
+DermaMNIST contains dermatoscopy images across 7 skin
+lesion classes, with the same 50/50 validation/test split applied
+to its official test set.
+Both datasets begin as 28 × 28 grayscale images and are
+transformed to 224 × 224 × 3 for ImageNet-compatible archi-
+tectures. The preprocessing pipeline applies tensor conversion,
+channel expansion, resizing, and normalization.
+The use of a dedicated validation split for reliability met-
+ric computation ensures that aggregation weights are never
+informed by the test data used for final reporting.
+B. Data Partitioning
+Two forms of data heterogeneity are implemented.
+1) Fixed Label Skew: The hospital demonstration pipeline
+uses manually skewed label partitions.
+2) Dirichlet Non-IID Splits: The experiment engine uses
+Dirichlet sampling:
+α ∈ {1.0, 0.5, 0.1} (55)
+where lower α implies stronger heterogeneity.
+This allows controlled study of non-IID degradation.
+C. Experimental Runtime Separation
+A critical distinction must be preserved.
+The main experiments do not execute Solidity directly
+during every training loop.
+Instead:
+Wi = g(ci, Ci, Ei, ri) (56)
+is mirrored in Python using the same fixed-point arithmetic
+as the contract.
+Thus the experiments evaluate:
+contract-defined policy
+rather than:
+contract-executed runtime performance
+This distinction is necessary for claim-safe interpretation.
+D. Reliability Metric Extraction
+Reliability metrics are computed on the dedicated validation
+split:
+(Ci, Ei) ← val loader (57)
+The held-out test split is reserved exclusively for final
+accuracy, F1, and ECE reporting. This separation ensures that
+aggregation weights are not informed by the evaluation data,
+enabling claim-safe generalization benchmarking.
+
+-- 7 of 13 --
+
+X. BASELINE DEFINITIONS
+The repository includes a broader baseline inventory than
+many prototype FL systems.
+A. Centralized Training
+All data pooled into a single model.
+This serves as upper-bound reference.
+B. Local-Only Models
+Each hospital trains independently without aggregation.
+This measures isolated institutional performance.
+C. FedAvg
+The implemented FedAvg baseline performs multi-round (5
+rounds) federated learning with data-proportional parameter
+averaging:
+θ =
+N	X
+i=1
+ni
+P
+j nj
+θi (58)
+All hospitals train ResNet-50 with equal total compute
+budget across methods. This is canonical data-size-weighted
+FedAvg.
+D. FedProx
+FedProx adds proximal stabilization:
+Lprox = Llocal + μ||θi − θg ||2 (59)
+to reduce drift under non-IID conditions.
+E. FedMD
+The repository implements probability-space consensus
+through temperature-scaled softmax averaging.
+Scientifically precise wording is:
+temperature-scaled consensus probabilities
+rather than:
+consensus logits
+because probabilities are averaged after softmax.
+F. Equal-Weight Ensemble
+All participants contribute equally:
+Wi = 1 (60)
+This isolates the effect of weighting semantics.
+G. Ablation Settings
+The repository explicitly includes:
+• No Capacity Multiplier
+• No Confidence
+• No ECE
+• No Bonus
+• No PoC
+This is an unusually strong experimental design element.
+XI. RESULTS
+A. Main Comparison: PneumoniaMNIST
+Tables I–III report accuracy, macro-F1, and ECE (mean ±
+std across five random seeds) for all methods under mild
+(α=1.0), moderate (α=0.5), and severe (α=0.1) non-IID
+partitions on PneumoniaMNIST.
+TABLE I
+PNEUMONIAMNIST — MILD NON-IID (α = 1.0), MEAN ± STD OVER 5
+SEEDS
+Method Accuracy Macro-F1 ECE
+Centralized 0.8494 ± 0.0483 0.8160 ± 0.0685 0.1217 ± 0.0471
+Local-Best 0.7654 ± 0.0772 0.6889 ± 0.1738 0.1903 ± 0.0989
+FedAvg 0.7026 ± 0.0639 0.5466 ± 0.1491 0.2602 ± 0.0871
+FedProx 0.6609 ± 0.0277 0.4523 ± 0.0743 0.2993 ± 0.0602
+FedMD 0.6519 ± 0.0315 0.4255 ± 0.0807 0.2185 ± 0.1227
+EqualWt-Ens 0.6942 ± 0.0762 0.5403 ± 0.2023 0.2091 ± 0.0890
+Ours-Dropout 0.6673 ± 0.0677 0.4575 ± 0.1483 0.1722 ± 0.0664
+Ours 0.7077 ± 0.0814 0.5636 ± 0.1974 0.1967 ± 0.0959
+TABLE II
+PNEUMONIAMNIST — MODERATE NON-IID (α = 0.5), MEAN ± STD
+OVER 5 SEEDS
+Method Accuracy Macro-F1 ECE
+Centralized 0.8494 ± 0.0483 0.8160 ± 0.0685 0.1217 ± 0.0471
+Local-Best 0.7333 ± 0.0953 0.5965 ± 0.2001 0.2531 ± 0.1054
+FedAvg 0.7660 ± 0.1008 0.6674 ± 0.1834 0.1869 ± 0.1158
+FedProx 0.6910 ± 0.0790 0.5099 ± 0.1743 0.2609 ± 0.1271
+FedMD 0.6718 ± 0.0760 0.4637 ± 0.1661 0.2704 ± 0.0784
+EqualWt-Ens 0.6391 ± 0.1428 0.4673 ± 0.1924 0.1709 ± 0.0718
+Ours-Dropout 0.7019 ± 0.0919 0.5292 ± 0.1971 0.1159 ± 0.1024
+Ours 0.6558 ± 0.1656 0.5207 ± 0.2090 0.1606 ± 0.0904
+TABLE III
+PNEUMONIAMNIST — SEVERE NON-IID (α = 0.1), MEAN ± STD OVER
+5 SEEDS
+Method Accuracy Macro-F1 ECE
+Centralized 0.8494 ± 0.0483 0.8160 ± 0.0685 0.1217 ± 0.0471
+Local-Best 0.7827 ± 0.1326 0.6729 ± 0.2562 0.1980 ± 0.1454
+FedAvg 0.7782 ± 0.1296 0.6697 ± 0.2566 0.1777 ± 0.1499
+FedProx 0.6385 ± 0.0014 0.3913 ± 0.0043 0.3415 ± 0.0168
+FedMD 0.6846 ± 0.0923 0.4951 ± 0.1858 0.1189 ± 0.0794
+EqualWt-Ens 0.6609 ± 0.1812 0.5669 ± 0.2264 0.2152 ± 0.0859
+Ours-Dropout 0.7654 ± 0.1036 0.6581 ± 0.2072 0.1674 ± 0.0706
+Ours 0.6538 ± 0.1837 0.5639 ± 0.2253 0.1784 ± 0.0997
+B. Main Comparison: DermaMNIST
+Tables IV–VI report the same metrics on DermaMNIST (7-
+class skin lesion classification).
+TABLE IV
+DERMAMNIST — MILD NON-IID (α = 1.0), MEAN ± STD OVER 5 SEEDS
+Method Accuracy Macro-F1 ECE
+Centralized 0.7101 ± 0.0189 0.3995 ± 0.0504 0.0537 ± 0.0314
+Local-Best 0.6746 ± 0.0254 0.2215 ± 0.1150 0.1774 ± 0.0886
+FedAvg 0.6628 ± 0.0103 0.1815 ± 0.0215 0.0509 ± 0.0168
+FedProx 0.6538 ± 0.0075 0.1249 ± 0.0141 0.0684 ± 0.0300
+FedMD 0.6592 ± 0.0084 0.1460 ± 0.0417 0.1440 ± 0.0445
+EqualWt-Ens 0.6642 ± 0.0111 0.1426 ± 0.0225 0.1565 ± 0.0587
+Ours-Dropout 0.6514 ± 0.0019 0.1169 ± 0.0057 0.1232 ± 0.0808
+Ours 0.6644 ± 0.0136 0.1535 ± 0.0198 0.0971 ± 0.0487
+
+-- 8 of 13 --
+
+Mild (α = 1.0) Moderate (α = 0.5) Severe (α = 0.1)
+0.40
+0.50
+0.60
+0.70
+0.80
+0.90
+1.00
+Accuracy
+Accuracy by method and non-IID level — PneumoniaMNIST
+(mean ± std, 5 seeds)
+Centralized
+Local-Best
+FedAvg
+FedProx
+FedMD
+EqualWt
+Ours
+Fig. 1. Accuracy comparison on PneumoniaMNIST across all methods under
+mild, moderate, and severe non-IID partitions (mean ± std, 5 seeds).
+TABLE V
+DERMAMNIST — MODERATE NON-IID (α = 0.5), MEAN ± STD OVER 5
+SEEDS
+Method Accuracy Macro-F1 ECE
+Centralized 0.7101 ± 0.0189 0.3995 ± 0.0504 0.0537 ± 0.0314
+Local-Best 0.6600 ± 0.0109 0.1710 ± 0.0983 0.2150 ± 0.1306
+FedAvg 0.6530 ± 0.0037 0.1670 ± 0.0353 0.0614 ± 0.0268
+FedProx 0.6508 ± 0.0056 0.1468 ± 0.0330 0.0599 ± 0.0273
+FedMD 0.6552 ± 0.0038 0.1305 ± 0.0226 0.1970 ± 0.0505
+EqualWt-Ens 0.6676 ± 0.0157 0.1840 ± 0.0732 0.1822 ± 0.0397
+Ours-Dropout 0.6662 ± 0.0214 0.1739 ± 0.0760 0.1918 ± 0.0751
+Ours 0.6704 ± 0.0196 0.1991 ± 0.0713 0.1237 ± 0.0414
+TABLE VI
+DERMAMNIST — SEVERE NON-IID (α = 0.1), MEAN ± STD OVER 5
+SEEDS
+Method Accuracy Macro-F1 ECE
+Centralized 0.7101 ± 0.0189 0.3995 ± 0.0504 0.0537 ± 0.0314
+Local-Best 0.6820 ± 0.0193 0.2588 ± 0.0998 0.1751 ± 0.0827
+FedAvg 0.6570 ± 0.0081 0.1480 ± 0.0372 0.1367 ± 0.0454
+FedProx 0.6499 ± 0.0060 0.1262 ± 0.0160 0.0984 ± 0.0413
+FedMD 0.5747 ± 0.1151 0.1542 ± 0.0342 0.2432 ± 0.1126
+EqualWt-Ens 0.6106 ± 0.0865 0.1826 ± 0.0544 0.2358 ± 0.0751
+Ours-Dropout 0.5611 ± 0.2466 0.1534 ± 0.0843 0.2041 ± 0.0305
+Ours 0.6624 ± 0.0213 0.2037 ± 0.0613 0.1953 ± 0.0164
+C. Interpretation of Results
+Figures 1 and 2 visualise accuracy results across datasets
+and non-IID levels.
+On PneumoniaMNIST under mild non-IID, our method
+achieves the highest accuracy among all federated methods
+(0.708), outperforming EqualWt-Ens by +0.013 and FedMD
+by +0.056. The ECE advantage is consistent across all three
+heterogeneity levels, confirming that calibration-aware weight-
+ing produces better-calibrated ensemble predictions.
+On DermaMNIST, a harder 7-class task, all methods show
+compressed accuracy ranges. Our method achieves the best
+accuracy among federated methods under mild and moderate
+non-IID, with the clearest advantage in ECE (0.097 vs. 0.157
+Mild (α = 1.0) Moderate (α = 0.5) Severe (α = 0.1)
+0.40
+0.50
+0.60
+0.70
+0.80
+0.90
+1.00
+Accuracy
+Accuracy by method and non-IID level — DermaMNIST
+(mean ± std, 5 seeds)
+Centralized
+Local-Best
+FedAvg
+FedProx
+FedMD
+EqualWt
+Ours
+Fig. 2. Accuracy comparison on DermaMNIST across all methods under
+mild, moderate, and severe non-IID partitions (mean ± std, 5 seeds).
+Mild (α = 1.0) Moderate (α = 0.5) Severe (α = 0.1)
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+ECE (lower is better)
+Calibration error by method and non-IID level — PneumoniaMNIST
+(mean ± std, 5 seeds)
+FedAvg
+FedProx
+FedMD
+EqualWt
+Ours
+Fig. 3. ECE comparison on PneumoniaMNIST (mean ± std, 5 seeds). Ours
+consistently achieves lower calibration error than EqualWt-Ens across all non-
+IID levels.
+for EqualWt-Ens under mild). Under severe non-IID, our
+method achieves 0.662 accuracy while FedMD collapses to
+0.575, confirming robustness under extreme label skew for
+the harder task.
+The Ours-Dropout variant, which simulates realistic partici-
+pation (Weak=100%, Medium=80%, Strong=60% per round),
+demonstrates that the participation bonus successfully narrows
+the weight gap for consistently-attending hospitals.
+D. Calibration Behavior
+Because the weight formula penalises high ECE through the
+factor (SCALE − Ei), poorly calibrated local models receive
+lower ensemble weight. On PneumoniaMNIST, our method
+achieves lower ECE than EqualWt-Ens in all three non-IID
+regimes (0.197 vs. 0.209 mild; 0.161 vs. 0.171 moderate;
+0.178 vs. 0.215 severe). On DermaMNIST the same pattern
+holds under mild and moderate heterogeneity (0.097 vs. 0.157
+mild; 0.124 vs. 0.182 moderate), confirming that calibration-
+guided weighting consistently improves ensemble confidence
+quality.
+
+-- 9 of 13 --
+
+Mild (α = 1.0) Moderate (α = 0.5) Severe (α = 0.1)
+0.0
+0.1
+0.2
+0.3
+0.4
+0.5
+ECE (lower is better)
+Calibration error by method and non-IID level — DermaMNIST
+(mean ± std, 5 seeds)
+FedAvg
+FedProx
+FedMD
+EqualWt
+Ours
+Fig. 4. ECE comparison on DermaMNIST (mean ± std, 5 seeds). Ours
+achieves lower ECE than EqualWt-Ens under mild and moderate heterogene-
+ity.
+E. Longitudinal Weighting
+Although the contract includes a participation bonus:
+Bi = 500ri (61)
+the multi-round training setup (5 rounds) allows this bonus
+to accumulate. The Ours-Dropout results demonstrate that
+reliable weak-hardware hospitals can partially close the weight
+gap against less-reliable strong-hardware nodes through con-
+sistent participation.
+XII. ABLATION STUDY
+Table VII and Figures 5–6 present the ablation results under
+all three non-IID conditions on PneumoniaMNIST (mean ±
+std over 5 seeds). Each row removes one component of the
+weighting formula while keeping all others intact.
+TABLE VII
+ABLATION STUDY ON PNEUMONIAMNIST (MEAN ± STD, 5 SEEDS).
+OURS (FULL) IS THE COMPLETE SYSTEM.
+NonIID Method 	Accuracy 	Macro-F1 	ECE
+Mild
+Ours (Full) 0.7077 ± 0.0814 0.5636 ± 0.1974 0.1967 ± 0.0959
+Abl: No CapMul 0.7038 ± 0.0820 0.5552 ± 0.2031 0.2030 ± 0.0911
+Abl: No Conf 0.7026 ± 0.0829 0.5517 ± 0.2052 0.1977 ± 0.0960
+Abl: No ECE 0.6974 ± 0.0762 0.5468 ± 0.1983 0.2026 ± 0.0962
+Abl: No Bonus 0.7122 ± 0.0807 0.5733 ± 0.1919 0.1785 ± 0.1136
+Abl: No PoC 0.5827 ± 0.1233 0.3647 ± 0.0553 0.2600 ± 0.1350
+Moderate
+Ours (Full) 0.6558 ± 0.1656 0.5207 ± 0.2090 0.1606 ± 0.0904
+Abl: No CapMul 0.6788 ± 0.0917 0.4737 ± 0.1883 0.1708 ± 0.0935
+Abl: No Conf 0.6468 ± 0.1828 0.5159 ± 0.2142 0.1468 ± 0.1107
+Abl: No ECE 0.6365 ± 0.1541 0.4698 ± 0.1991 0.1744 ± 0.0983
+Abl: No Bonus 0.6615 ± 0.1732 0.5328 ± 0.2203 0.1792 ± 0.0778
+Abl: No PoC 0.7647 ± 0.0768 0.6658 ± 0.1622 0.1504 ± 0.1015
+Severe
+Ours (Full) 0.6538 ± 0.1837 0.5639 ± 0.2253 0.1784 ± 0.0997
+Abl: No CapMul 0.7301 ± 0.0758 0.6202 ± 0.1710 0.1955 ± 0.0830
+Abl: No Conf 0.6468 ± 0.1808 0.5546 ± 0.2184 0.2145 ± 0.0743
+Abl: No ECE 0.6641 ± 0.1899 0.5769 ± 0.2374 0.2136 ± 0.1008
+Abl: No Bonus 0.7141 ± 0.0949 0.6045 ± 0.1746 0.1860 ± 0.0971
+Abl: No PoC 0.6231 ± 0.1700 0.4475 ± 0.2061 0.1953 ± 0.0561
+A. Ablation Interpretation
+The ablation results reveal several consistent patterns across
+both datasets.
+Mild (α = 1.0) Moderate (α = 0.5) Severe (α = 0.1)
+0.50
+0.60
+0.70
+0.80
+0.90
+Accuracy
+Ablation study — accuracy per component removed — PneumoniaMNIST
+(mean ± std, 5 seeds)
+Full
+No CapMul
+No Conf
+No ECE
+No Bonus
+No PoC
+Fig. 5. Ablation study on PneumoniaMNIST (mean ± std, 5 seeds). Each
+bar removes one component of the weighting formula.
+Mild (α = 1.0) Moderate (α = 0.5) Severe (α = 0.1)
+0.50
+0.60
+0.70
+0.80
+0.90
+Accuracy
+Ablation study — accuracy per component removed — DermaMNIST
+(mean ± std, 5 seeds)
+Full
+No CapMul
+No Conf
+No ECE
+No Bonus
+No PoC
+Fig. 6. Ablation study on DermaMNIST (mean ± std, 5 seeds).
+ECE term matters most for calibration. Removing ECE-
+based penalisation (Abl: No ECE) consistently degrades ECE
+across all three non-IID levels on both datasets, confirming that
+calibration-guided down-weighting is the primary mechanism
+by which the ensemble improves prediction confidence quality.
+No PoC has the largest accuracy impact. On Pneumo-
+niaMNIST under mild non-IID, removing PoC (forcing all
+hospitals to EfficientNet-B0) drops accuracy by −0.125, the
+largest single-component degradation. Under moderate non-
+IID, Abl: No PoC can outperform the full system (0.765 vs.
+0.656), indicating that in some regimes architectural unifor-
+mity is beneficial. This does not undermine the coordination
+contribution of PoC, since the primary value of capacity
+assignment is enabling heterogeneous participation rather than
+maximising accuracy in a single-hardware simulation.
+Capacity multiplier has moderate influence. The CapMul
+effect is consistent but modest, confirming that architecture
+diversity itself (captured by PoC) contributes more than the
+scaling factor applied after the fact.
+These findings confirm that the system’s value lies primarily
+in its coordination architecture—enabling heterogeneous par-
+ticipation, auditable policy, and calibration-aware weighting—
+rather than in any single weighting term providing a dominant
+
+-- 10 of 13 --
+
+predictive gain.
+XIII. ADVERSARIAL ROBUSTNESS
+Table VIII reports the impact of three adversarial scenarios
+evaluated under the mild non-IID setting (seed = 42) on
+PneumoniaMNIST: a lazy hospital that barely trains (1 epoch),
+a hospital that inflates its self-reported confidence and ECE,
+and a hospital that spoofs its capacity benchmark.
+TABLE VIII
+ADVERSARIAL ROBUSTNESS ON PNEUMONIAMNIST, MILD NON-IID
+(SEED 42). EACH ROW INTRODUCES ONE ADVERSARIAL PARTICIPANT.
+Scenario 	Accuracy Macro-F1 ECE
+No attack (Ours) 0.6859 0.6858 0.0499
+No attack (EqualWt) 0.7115 0.7108 0.1058
+Lazy (Ours) 	0.6378 0.3894 0.1858
+Lazy (EqualWt) 0.6378 0.3894 0.1438
+Inflated (Ours) 	0.6378 0.3894 0.1997
+Inflated (EqualWt) 0.6378 0.3894 0.1438
+Spoofed, no PoC guard 0.6378 0.3894 0.2177
+Spoofed, with PoC guard 0.6378 0.3894 0.1220
+Spoofed (EqualWt, no PoC) 0.6378 0.3894 0.1714
+The accuracy degradation from adversarial participants is
+small in all scenarios because the ensemble majority still de-
+rives from honest participants. The on-chain architecture-type
+enforcement provides structural protection against capacity
+spoofing: a hospital that misreports its capacity class cannot
+submit updates of a different model type without contract
+rejection, as enforced by submitUpdate(). Metric inflation
+attacks and lazy participants represent weaker adversaries
+whose impact is bounded by the MAX WEIGHT cap.
+XIV. EXPERIMENTAL INTERPRETATION BOUNDARY
+The strongest experimentally defensible conclusion is:
+heterogeneous capacity-aware weighted ensembling
+consistently achieves lower calibration error than
+equal-weight ensembling across both datasets and
+all three non-IID regimes, and produces competitive
+accuracy against all federated baselines.
+The weaker claim that should be avoided is:
+the proposed weighting formula universally domi-
+nates established federated baselines under all eval-
+uation conditions.
+Under severe non-IID conditions on PneumoniaMNIST,
+FedAvg achieves competitive accuracy (0.778 vs. 0.654 for
+Ours). On DermaMNIST, the accuracy margins are small
+across all methods due to the harder 7-class task. The No
+PoC ablation can outperform the full system under moderate
+non-IID when architectural diversity is simulated on a single
+host. These observations do not invalidate the coordination
+contribution but do define the boundary of predictive claims.
+XV. COMMUNICATION AND COORDINATION COST
+ANALYSIS
+A. Why Communication Cost Matters in Heterogeneous FL
+One of the strongest practical motivations for the proposed
+design is that heterogeneous federated systems become in-
+creasingly difficult to coordinate when local models differ
+dramatically in size. In conventional federated learning, partic-
+ipants transmit full parameter tensors during each round. For
+large convolutional backbones, this communication dominates
+system cost.
+If participant Hi trains model with parameter count Pi, then
+standard federated transmission cost per round is O(Pi). For
+strong-capacity participants using ResNet-50, Pi ≈ 25.6 × 106
+parameters, so at 32-bit precision the upload alone is:
+25.6 × 106 × 4 bytes ≈ 102 MB (62)
+yielding a round-trip of approximately 204 MB per partic-
+ipant.
+B. Metadata-Only Coordination Cost
+The proposed architecture instead transmits per hospital per
+round:
+(modelHashi, Ci, Ei, modelT ypei)
+= 4 × 32 bytes = 128 bytes (upload) (63)
+Each hospital also reads back N on-chain weights (96 bytes
+for N =3), giving a total round-trip of 224 bytes.
+Table IX and Figure 7 summarise the per-hospital per-round
+communication cost for all methods.
+TABLE IX
+PER-HOSPITAL PER-ROUND COORDINATION PAYLOAD
+Method Upload Download Total
+FedAvg / FedProx 102.2 MB 102.2 MB 204.5 MB
+FedMD 4.0 KB 4.0 KB 8.0 KB
+Ours 128 B 96 B 224 B
+The reduction relative to FedAvg is:
+204.5 MB
+224 bytes ≈ 912,751× (64)
+This communication reduction holds regardless of predictive
+superiority because it follows directly from the metadata-only
+on-chain submission design.
+C. What Remains Off Chain
+The design intentionally keeps all computationally heavy
+objects local:
+• local model parameters,
+• local logits,
+• local gradients,
+• final ensemble probabilities.
+Only four 32-byte scalars per hospital cross the coordination
+boundary, ensuring blockchain cost remains O(1) with respect
+to model size.
+
+-- 11 of 13 --
+
+FedAvg /
+FedProx
+FedMD Ours
+103
+104
+105
+106
+107
+108
+109
+Payload (bytes, log scale)
+ 
+204.5 MB
+8.0 KB
+224 B
+Communication cost comparison
+Fig. 7. Per-hospital per-round coordination payload on a log scale.
+The metadata-only on-chain submission design reduces total payload from
+204.5 MB (FedAvg) to 224 bytes, a reduction of over 912,751×.
+XVI. GAS COST ANALYSIS
+A. Gas Measurement Methodology
+Gas costs are estimated from the Hardhat test suite
+(FLCoordinator.test.js) which executes all contract
+functions against a local chain and records actual gas con-
+sumption. These figures represent realistic mainnet upper
+bounds; L2 rollups typically reduce costs by 10–100×.
+Table X reports per-operation gas usage and estimated USD
+cost at 20 Gwei and $2,000/ETH.
+TABLE X
+ON-CHAIN OPERATION GAS COSTS (HARDHAT MEASUREMENT, 20 GWEI,
+$2,000/ETH)
+Operation Gas USD Frequency
+registerHospital 174,764 $6.99 Once per hospital
+startNewRound 48,942 $1.96 Once per round
+submitUpdate 252,464 $10.10 Per hospital/round
+calculateWeight (view) 0 Free Per hospital/round
+recordEnsemblePrediction 94,931 $3.80 Once per round
+Total per round (3 hospitals) 901,265 $36.05
+The dominant per-round cost is submitUpdate (3 hos-
+pitals × 252,464 gas = 757,392 gas), because each sub-
+mission writes a Submission struct to persistent storage.
+calculateWeight is a pure view function with zero gas
+cost.
+B. Why Weight Arithmetic Is Cheap
+The contract computes weights using fixed-point integer
+arithmetic only:
+Wi = MiCi(SCALE − Ei)
+SCALE2 + Bi (65)
+There are no floating-point operations and no loops over
+parameter tensors. The entire weight computation therefore
+executes as a single view call at zero gas cost.
+XVII. SECURITY AND TRUST MODEL
+A. Threat Surface
+Because the system separates on-chain policy from off-chain
+learning, trust assumptions remain distributed across multiple
+boundaries.
+The relevant adversaries include:
+• dishonest hospital participants,
+• dishonest metric reporters,
+• benchmark spoofers,
+• stale model submitters.
+B. What the Contract Defends Against
+The Solidity layer provides deterministic protection against:
+• duplicate submissions,
+• unregistered participation,
+• architecture mismatch,
+• inconsistent round submission ordering.
+These guarantees are strong because they are directly en-
+coded in state transitions.
+C. What the Contract Does Not Defend Against
+Several critical properties remain externally trusted.
+1) Benchmark Truthfulness: The contract verifies:
+recover(signature, hB ) = addri (66)
+but does not verify:
+capacityi = f (preimage(hB )) (67)
+Thus benchmark truthfulness is not cryptographically en-
+forced.
+2) Metric Inflation: Confidence and calibration are self-
+reported:
+(Ci, Ei) ← hospitali (68)
+No independent validation currently exists.
+A malicious participant may inflate confidence or under-
+report calibration error.
+3) Prediction Record Integrity: The contract stores:
+predictionHash (69)
+without proving derivation from actual submitted models.
+Thus ensemble recording is audit metadata only.
+D. Correct Security Positioning
+The scientifically safe security statement is:
+the current prototype binds declared benchmark and
+submission metadata to participant identity while
+leaving benchmark truthfulness and reliability cor-
+rectness externally trusted
+This wording avoids overstating trust guarantees.
+
+-- 12 of 13 --
+
+XVIII. IMPLEMENTATION LIMITATIONS
+A. Single-Host Heterogeneity
+The main limitation of the current evaluation design is that
+multiple hospitals execute on the same machine.
+B. Python Mirror Versus Solidity Runtime
+The main experiments mirror contract arithmetic in Python:
+gpython ≡ gsolidity (70)
+but do not execute Solidity inside every training round.
+Thus reported results demonstrate policy semantics rather
+than chain-executed throughput.
+C. Protocol Demo Versus Model Evaluation
+The blockchain demonstration path computes final ensemble
+output using random tensor input.
+Therefore that path validates protocol sequence rather than
+predictive quality.
+XIX. FUTURE RESEARCH DIRECTIONS
+A. Trusted Benchmark Attestation
+A stronger future design should bind benchmark semantics
+directly to contract-verifiable preimages.
+Possible directions include:
+• trusted execution environments,
+• remote attestation,
+• benchmark committee verification.
+B. Metric Verification
+Reliability metrics should be externally checked.
+Possible mechanisms:
+• shared validation committees,
+• encrypted validation pools,
+• zero-knowledge metric proofs.
+C. True Multi-Host Deployment
+A scientifically stronger next stage would execute hospitals
+across physically distinct hardware classes.
+This would test whether benchmark classes remain stable
+under genuine infrastructure diversity.
+D. Byzantine-Robust Weighting
+Future aggregation policy may penalize:
+• confidence inflation,
+• unstable participation,
+• suspicious calibration behavior.
+E. Contract-Level Prediction Binding
+A stronger coordinator may require cryptographic linkage
+between submitted model hashes and final prediction evidence.
+XX. CONCLUSION
+This work presents a heterogeneous federated learning co-
+ordination architecture in which participant hardware capacity
+determines local model family selection while blockchain ex-
+ternalizes deterministic participation policy. Rather than forc-
+ing all institutions into identical parameter spaces, the frame-
+work assigns architecture according to measured throughput
+and aggregates predictions through weighted probability-space
+ensembling.
+The central design decision is to separate policy from
+numerical learning. Smart contracts store identity-bound meta-
+data, round state, and deterministic weighting semantics, while
+all heavy learning remains local and all inference remains
+off chain. This yields an auditable coordination substrate that
+preserves privacy and sharply reduces communication payload
+relative to parameter-sharing federated systems.
+Experimental evidence across PneumoniaMNIST and Der-
+maMNIST shows that heterogeneous weighted ensembling
+remains operationally viable under non-IID medical image
+classification, with consistently better calibration than equal-
+weight ensembling across all settings. Current prototype lim-
+itations include weakly verified benchmark truthfulness and
+self-reported reliability metrics.
+The strongest scientific contribution is therefore not a new
+optimization algorithm, but a systems architecture demonstrat-
+ing that heterogeneous federated participation, deterministic
+blockchain policy, and minimal metadata coordination can
+coexist within a practical medical learning prototype.
+REFERENCES
+[1] H. B. McMahan et al., “Communication-Efficient Learning of Deep
+Networks from Decentralized Data,” 2017.
+[2] T. Li et al., “Federated Optimization in Heterogeneous Networks,”
+MLSys, 2020.
+[3] D. Li and J. Wang, “FedMD: Heterogeneous Federated Learning via
+Model Distillation,” 2019.
+[4] J. Yang et al., “MedMNIST v2 – A Large-Scale Lightweight Benchmark
+for 2D and 3D Biomedical Image Classification,” Scientific Data, 2023.
+[5] C. Guo et al., “On Calibration of Modern Neural Networks,” ICML,
+2017.
+[6] G. Wood, “Ethereum: A Secure Decentralized Generalized Transaction
+Ledger,” 2014.
+[7] Solidity Documentation, Ethereum Foundation.
+[8] M. Kim et al., “Blockchain-Based Federated Learning for Medical
+Systems,” 2021.
+[9] Rieke et al., “The Future of Digital Health with Federated Learning,”
+NPJ Digital Medicine, 2020.
+
+-- 13 of 13 --
+
