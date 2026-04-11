@@ -5,7 +5,7 @@ Generates all paper figures from experiment_results.csv.
 Output: figures/*.pdf  (vector, ready for \\includegraphics in LaTeX)
 
 Run:
-    python generate_figures.py
+    python simulation/generate_figures.py
 """
 
 import csv
@@ -19,8 +19,8 @@ import matplotlib.patches as mpatches
 import numpy as np
 
 # ── Paths ────────────────────────────────────────────────────────────────────
-CSV_PATH     = Path("simulation/results/experiment_results.csv")
-FIGURES_DIR  = Path("figures")
+CSV_PATH     = Path(__file__).parent / "results/experiment_results.csv"
+FIGURES_DIR  = Path(__file__).parent / "figures"
 FIGURES_DIR.mkdir(exist_ok=True)
 
 # ── IEEE-friendly style ───────────────────────────────────────────────────────
@@ -40,6 +40,8 @@ NONIID_LABELS  = {"mild": r"Mild ($\alpha{=}1.0$)",
                    "moderate": r"Moderate ($\alpha{=}0.5$)",
                    "severe": r"Severe ($\alpha{=}0.1$)"}
 MAIN_SEEDS     = ("42", "142", "242", "342", "442")
+DATASETS       = ["pneumoniamnist", "dermamnist"]
+DATASET_LABELS = {"pneumoniamnist": "PneumoniaMNIST", "dermamnist": "DermaMNIST"}
 
 # Colorblind-friendly palette (Wong 2011)
 COLORS  = ["#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7"]
@@ -52,10 +54,11 @@ def load_rows():
         return list(csv.DictReader(f))
 
 
-def collect(rows, method, noniid, seeds=MAIN_SEEDS):
+def collect(rows, method, noniid, dataset, seeds=MAIN_SEEDS):
     accs, f1s, eces = [], [], []
     for r in rows:
-        if r["method"] == method and r["noniid"] == noniid and r["seed"] in seeds:
+        if (r["method"] == method and r["noniid"] == noniid
+                and r["dataset"] == dataset and r["seed"] in seeds):
             accs.append(float(r["accuracy"]))
             f1s.append(float(r["f1_score"]))
             eces.append(float(r["ece"]))
@@ -71,7 +74,7 @@ def mean_std(vals):
 
 
 # ── Figure 1: Main accuracy comparison ───────────────────────────────────────
-def fig_accuracy(rows):
+def fig_accuracy(rows, dataset):
     methods = ["Centralized", "Local-Best", "FedAvg", "FedProx",
                "FedMD", "EqualWt-Ens", "Ours"]
     noniids = ["mild", "moderate", "severe"]
@@ -88,7 +91,7 @@ def fig_accuracy(rows):
     for i, (method, label) in enumerate(zip(methods, short)):
         means, errs = [], []
         for noniid in noniids:
-            accs, _, _ = collect(rows, method, noniid)
+            accs, _, _ = collect(rows, method, noniid, dataset)
             m, s = mean_std(accs)
             means.append(m)
             errs.append(s)
@@ -106,18 +109,18 @@ def fig_accuracy(rows):
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}"))
     ax.legend(ncol=2, loc="upper right", framealpha=0.9,
               handlelength=1.2, handleheight=0.9)
-    ax.set_title("Accuracy by method and non-IID level\n(mean ± std, 5 seeds)")
+    ax.set_title(f"Accuracy by method and non-IID level — {DATASET_LABELS[dataset]}\n(mean ± std, 5 seeds)")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
-    out = FIGURES_DIR / "fig1_accuracy.pdf"
+    out = FIGURES_DIR / f"fig1_accuracy_{dataset}.pdf"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {out}")
 
 
 # ── Figure 2: ECE comparison ──────────────────────────────────────────────────
-def fig_ece(rows):
+def fig_ece(rows, dataset):
     methods = ["FedAvg", "FedProx", "FedMD", "EqualWt-Ens", "Ours"]
     short   = ["FedAvg", "FedProx", "FedMD", "EqualWt", "Ours"]
     noniids = ["mild", "moderate", "severe"]
@@ -131,7 +134,7 @@ def fig_ece(rows):
     for i, (method, label) in enumerate(zip(methods, short)):
         means, errs = [], []
         for noniid in noniids:
-            _, _, eces = collect(rows, method, noniid)
+            _, _, eces = collect(rows, method, noniid, dataset)
             m, s = mean_std(eces)
             means.append(m)
             errs.append(s)
@@ -148,11 +151,11 @@ def fig_ece(rows):
     ax.set_ylim(0, 0.50)
     ax.legend(ncol=2, loc="upper left", framealpha=0.9,
               handlelength=1.2, handleheight=0.9)
-    ax.set_title("Calibration error by method and non-IID level\n(mean ± std, 5 seeds)")
+    ax.set_title(f"Calibration error by method and non-IID level — {DATASET_LABELS[dataset]}\n(mean ± std, 5 seeds)")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
-    out = FIGURES_DIR / "fig2_ece.pdf"
+    out = FIGURES_DIR / f"fig2_ece_{dataset}.pdf"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {out}")
@@ -209,7 +212,7 @@ def fig_communication():
 
 
 # ── Figure 4: Ablation study ──────────────────────────────────────────────────
-def fig_ablation(rows):
+def fig_ablation(rows, dataset):
     components = ["Ours", "Abl:No CapMul", "Abl:No Conf",
                   "Abl:No ECE", "Abl:No Bonus", "Abl:No PoC"]
     short      = ["Full", "No CapMul", "No Conf",
@@ -225,7 +228,7 @@ def fig_ablation(rows):
     for i, (comp, label) in enumerate(zip(components, short)):
         means, errs = [], []
         for noniid in noniids:
-            accs, _, _ = collect(rows, comp, noniid)
+            accs, _, _ = collect(rows, comp, noniid, dataset)
             m, s = mean_std(accs)
             means.append(m)
             errs.append(s)
@@ -243,11 +246,11 @@ def fig_ablation(rows):
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}"))
     ax.legend(ncol=2, loc="upper right", framealpha=0.9,
               handlelength=1.2, handleheight=0.9)
-    ax.set_title("Ablation study — accuracy per component removed\n(mean ± std, 5 seeds)")
+    ax.set_title(f"Ablation study — accuracy per component removed — {DATASET_LABELS[dataset]}\n(mean ± std, 5 seeds)")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
-    out = FIGURES_DIR / "fig3_ablation.pdf"
+    out = FIGURES_DIR / f"fig3_ablation_{dataset}.pdf"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"  Saved {out}")
@@ -261,10 +264,13 @@ if __name__ == "__main__":
     rows = load_rows()
     print(f"Loaded {len(rows)} rows. Generating figures...")
 
-    fig_accuracy(rows)
-    fig_ece(rows)
-    fig_communication()
-    fig_ablation(rows)
+    for ds in DATASETS:
+        print(f"\n  Dataset: {DATASET_LABELS[ds]}")
+        fig_accuracy(rows, ds)
+        fig_ece(rows, ds)
+        fig_ablation(rows, ds)
+
+    fig_communication()  # dataset-independent
 
     print(f"\nDone. All figures saved to {FIGURES_DIR}/")
-    print("Include in LaTeX with: \\includegraphics[width=\\columnwidth]{figures/figN_name}")
+    print("Include in LaTeX with: \\includegraphics[width=\\columnwidth]{figures/figN_name_dataset}")

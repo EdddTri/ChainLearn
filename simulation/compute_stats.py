@@ -5,14 +5,20 @@ Recomputes every number cited in the paper from experiment_results.csv
 and the constants defined in experiment.py.
 
 Run:
-    python compute_stats.py
+    python simulation/compute_stats.py
 """
 
 import csv
 import statistics
 from pathlib import Path
 
-CSV_PATH = Path(__file__).parent / "simulation/results/experiment_results.csv"
+CSV_PATH = Path(__file__).parent / "results/experiment_results.csv"
+
+DATASETS = ["pneumoniamnist", "dermamnist"]
+DATASET_LABELS = {
+    "pneumoniamnist": "PneumoniaMNIST",
+    "dermamnist":     "DermaMNIST",
+}
 
 # ── Constants (must match experiment.py and FLCoordinator.sol) ──────────────
 NUM_HOSPITALS   = 3
@@ -58,7 +64,7 @@ def mean_std(values):
     return m, s
 
 
-def collect(rows, method, noniid, dataset="pneumoniamnist",
+def collect(rows, method, noniid, dataset,
             seeds=("42", "142", "242", "342", "442")):
     accs, f1s, eces = [], [], []
     for r in rows:
@@ -76,22 +82,24 @@ def print_main_results(rows):
         "Centralized", "Local-Best", "FedAvg", "FedProx",
         "FedMD", "EqualWt-Ens", "Ours", "Ours-Dropout",
     ]
-    print("\n" + "=" * 80)
-    print("  MAIN COMPARISON — PneumoniaMNIST (mean ± std, 5 seeds)")
-    print("=" * 80)
+    for dataset in DATASETS:
+        label = DATASET_LABELS[dataset]
+        print("\n" + "=" * 80)
+        print(f"  MAIN COMPARISON — {label} (mean ± std, 5 seeds)")
+        print("=" * 80)
 
-    for noniid, alpha in [("mild", "1.0"), ("moderate", "0.5"), ("severe", "0.1")]:
-        print(f"\n  Non-IID: {noniid} (alpha={alpha})")
-        print(f"  {'Method':<22} {'Accuracy':>18} {'Macro-F1':>18} {'ECE':>18}")
-        print(f"  {'-'*22} {'-'*18} {'-'*18} {'-'*18}")
-        for m in main_methods:
-            accs, f1s, eces = collect(rows, m, noniid)
-            if not accs:
-                continue
-            am, as_ = mean_std(accs)
-            fm, fs  = mean_std(f1s)
-            em, es  = mean_std(eces)
-            print(f"  {m:<22} {am:.4f} ± {as_:.4f}   {fm:.4f} ± {fs:.4f}   {em:.4f} ± {es:.4f}")
+        for noniid, alpha in [("mild", "1.0"), ("moderate", "0.5"), ("severe", "0.1")]:
+            print(f"\n  Non-IID: {noniid} (alpha={alpha})")
+            print(f"  {'Method':<22} {'Accuracy':>18} {'Macro-F1':>18} {'ECE':>18}")
+            print(f"  {'-'*22} {'-'*18} {'-'*18} {'-'*18}")
+            for m in main_methods:
+                accs, f1s, eces = collect(rows, m, noniid, dataset)
+                if not accs:
+                    continue
+                am, as_ = mean_std(accs)
+                fm, fs  = mean_std(f1s)
+                em, es  = mean_std(eces)
+                print(f"  {m:<22} {am:.4f} ± {as_:.4f}   {fm:.4f} ± {fs:.4f}   {em:.4f} ± {es:.4f}")
 
 
 # ── Section 2: Ablation table ────────────────────────────────────────────────
@@ -100,22 +108,24 @@ def print_ablation_results(rows):
         "Ours", "Abl:No CapMul", "Abl:No Conf",
         "Abl:No ECE", "Abl:No Bonus", "Abl:No PoC",
     ]
-    print("\n" + "=" * 80)
-    print("  ABLATION STUDY — PneumoniaMNIST (mean ± std, 5 seeds)")
-    print("=" * 80)
+    for dataset in DATASETS:
+        label = DATASET_LABELS[dataset]
+        print("\n" + "=" * 80)
+        print(f"  ABLATION STUDY — {label} (mean ± std, 5 seeds)")
+        print("=" * 80)
 
-    for noniid, alpha in [("mild", "1.0"), ("moderate", "0.5"), ("severe", "0.1")]:
-        print(f"\n  Non-IID: {noniid} (alpha={alpha})")
-        print(f"  {'Method':<22} {'Accuracy':>18} {'Macro-F1':>18} {'ECE':>18}")
-        print(f"  {'-'*22} {'-'*18} {'-'*18} {'-'*18}")
-        for m in ablations:
-            accs, f1s, eces = collect(rows, m, noniid)
-            if not accs:
-                continue
-            am, as_ = mean_std(accs)
-            fm, fs  = mean_std(f1s)
-            em, es  = mean_std(eces)
-            print(f"  {m:<22} {am:.4f} ± {as_:.4f}   {fm:.4f} ± {fs:.4f}   {em:.4f} ± {es:.4f}")
+        for noniid, alpha in [("mild", "1.0"), ("moderate", "0.5"), ("severe", "0.1")]:
+            print(f"\n  Non-IID: {noniid} (alpha={alpha})")
+            print(f"  {'Method':<22} {'Accuracy':>18} {'Macro-F1':>18} {'ECE':>18}")
+            print(f"  {'-'*22} {'-'*18} {'-'*18} {'-'*18}")
+            for m in ablations:
+                accs, f1s, eces = collect(rows, m, noniid, dataset)
+                if not accs:
+                    continue
+                am, as_ = mean_std(accs)
+                fm, fs  = mean_std(f1s)
+                em, es  = mean_std(eces)
+                print(f"  {m:<22} {am:.4f} ± {as_:.4f}   {fm:.4f} ± {fs:.4f}   {em:.4f} ± {es:.4f}")
 
 
 # ── Section 3: Adversarial results ──────────────────────────────────────────
@@ -126,19 +136,22 @@ def print_adversarial_results(rows):
         "Inflated (Ours)", "Inflated (EqualWt)",
         "Spoofed (no PoC)", "Spoofed (with PoC)", "Spoofed (EqualWt, no PoC)",
     ]
-    print("\n" + "=" * 80)
-    print("  ADVERSARIAL ROBUSTNESS — seed=adv_42")
-    print("=" * 80)
+    for dataset in DATASETS:
+        label = DATASET_LABELS[dataset]
+        print("\n" + "=" * 80)
+        print(f"  ADVERSARIAL ROBUSTNESS — {label} seed=adv_42")
+        print("=" * 80)
 
-    for noniid in ["mild", "moderate", "severe"]:
-        print(f"\n  Non-IID: {noniid}")
-        print(f"  {'Scenario':<35} {'Accuracy':>10} {'Macro-F1':>10} {'ECE':>10}")
-        print(f"  {'-'*35} {'-'*10} {'-'*10} {'-'*10}")
-        for m in adv_methods:
-            for r in rows:
-                if r["method"] == m and r["noniid"] == noniid and r["seed"] == "adv_42":
-                    print(f"  {m:<35} {float(r['accuracy']):.4f}     "
-                          f"{float(r['f1_score']):.4f}     {float(r['ece']):.4f}")
+        for noniid in ["mild", "moderate", "severe"]:
+            print(f"\n  Non-IID: {noniid}")
+            print(f"  {'Scenario':<35} {'Accuracy':>10} {'Macro-F1':>10} {'ECE':>10}")
+            print(f"  {'-'*35} {'-'*10} {'-'*10} {'-'*10}")
+            for m in adv_methods:
+                for r in rows:
+                    if (r["method"] == m and r["noniid"] == noniid
+                            and r["seed"] == "adv_42" and r["dataset"] == dataset):
+                        print(f"  {m:<35} {float(r['accuracy']):.4f}     "
+                              f"{float(r['f1_score']):.4f}     {float(r['ece']):.4f}")
 
 
 # ── Section 4: Communication cost ───────────────────────────────────────────
@@ -212,10 +225,28 @@ def print_gas_cost():
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    import io
+    import sys
+
     if not CSV_PATH.exists():
         raise FileNotFoundError(f"CSV not found: {CSV_PATH}\nRun experiment.py first.")
 
     rows = load_rows()
+
+    # Capture all output so it can be printed and saved simultaneously
+    buf = io.StringIO()
+    real_stdout = sys.stdout
+
+    class Tee:
+        def write(self, s):
+            real_stdout.write(s)
+            buf.write(s)
+        def flush(self):
+            real_stdout.flush()
+            buf.flush()
+
+    sys.stdout = Tee()
+
     print(f"Loaded {len(rows)} rows from {CSV_PATH.name}")
     print(f"Methods : {sorted(set(r['method'] for r in rows))}")
     print(f"NonIID  : {sorted(set(r['noniid'] for r in rows))}")
@@ -227,3 +258,9 @@ if __name__ == "__main__":
     print_communication_cost()
     print_gas_cost()
     print()
+
+    sys.stdout = real_stdout
+
+    stats_path = CSV_PATH.parent / "computed_stats.txt"
+    stats_path.write_text(buf.getvalue(), encoding="utf-8")
+    print(f"Stats saved to {stats_path}")

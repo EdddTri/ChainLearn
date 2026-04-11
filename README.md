@@ -86,11 +86,6 @@ The ensemble prediction hash is recorded on-chain via `recordEnsemblePrediction(
 
 ```
 ChainLearn/
-|-- compute_stats.py          # Recomputes all cited figures from experiment_results.csv
-|-- generate_figures.py         # Generates paper figures (figures/*.pdf)
-|-- figures/                    # Generated PDFs: fig1_accuracy, fig2_ece,
-|                               #   fig3_ablation, fig4_communication
-|
 |-- smart_contracts/
 |   |-- contracts/
 |   |   |-- FLCoordinator.sol       # Solidity smart contract
@@ -112,10 +107,16 @@ ChainLearn/
 |-- simulation/
 |   |-- run_simulation.py       # End-to-end simulation with local Hardhat node
 |   |-- experiment.py           # Comprehensive experiment: baselines, ablations, stats
+|   |-- compute_stats.py        # Recomputes all cited figures from experiment_results.csv
+|   |-- generate_figures.py     # Generates paper figures (simulation/figures/*.pdf)
 |   |-- simulate_federation.py  # Basic FL simulation (synthetic data)
 |   |-- test_blockchain_integration.py  # Integration smoke test (currently failing)
+|   |-- figures/                # Generated PDFs per dataset:
+|   |   |                       #   fig1_accuracy_{dataset}, fig2_ece_{dataset},
+|   |   |                       #   fig3_ablation_{dataset}, fig4_communication
 |   |-- results/
-|   |   |-- experiment_results.csv  # Output from experiment.py
+|   |   |-- experiment_results.csv   # Output from experiment.py (both datasets)
+|   |   |-- computed_stats.txt       # Output from compute_stats.py
 ```
 
 ### File Descriptions
@@ -137,6 +138,10 @@ ChainLearn/
 **`simulation/run_simulation.py`** -- End-to-end simulation that automatically starts a Hardhat node, deploys the contract, registers 3 hospitals with signed PoC, runs multi-round training, reads on-chain weights, computes weighted ensemble prediction, and records the ensemble hash on-chain.
 
 **`simulation/experiment.py`** -- Comprehensive experiment framework supporting multiple datasets, non-IID severity levels, random seeds, baseline comparisons, ablation studies, adversarial experiments, and cost analysis. Outputs formatted tables and CSV results.
+
+**`simulation/compute_stats.py`** -- Recomputes every number cited in the paper from `experiment_results.csv`. Loops over both datasets and prints mean ± std tables for main results, ablations, adversarial scenarios, communication cost, and gas cost. Saves full output to `simulation/results/computed_stats.txt`.
+
+**`simulation/generate_figures.py`** -- Generates all paper figures as PDFs into `simulation/figures/`. Produces per-dataset figures for accuracy (fig1), ECE (fig2), and ablation (fig3), plus one shared communication cost figure (fig4).
 
 ## Smart Contract: FLCoordinator
 
@@ -260,9 +265,12 @@ Gas costs measured from the Hardhat test suite (`FLCoordinator.test.js`) at 20 G
 
 ### Datasets
 
-- **PneumoniaMNIST** -- Chest X-rays, 2 classes (normal/pneumonia). 4,708 train images, with the official test split (624 images) divided 50/50 into 312 validation / 312 test. Validation is used for reliability metrics (confidence, ECE); test is used only for final evaluation. Resized from 28×28 to 224×224×3 for ImageNet-compatible backbones.
+Both datasets are sourced from [MedMNIST](https://medmnist.com/) and downloaded automatically on first run.
 
-Sourced from [MedMNIST](https://medmnist.com/). All paper results use PneumoniaMNIST only.
+- **PneumoniaMNIST** -- Chest X-rays, 2 classes (normal/pneumonia). 4,708 train images, with the official test split (624 images) divided 50/50 into 312 validation / 312 test. Resized from 28×28 to 224×224×3 for ImageNet-compatible backbones.
+- **DermaMNIST** -- Dermatoscopy images, 7 classes. Resized from 28×28 to 224×224×3.
+
+In both cases, the validation split is used exclusively for computing reliability metrics (confidence, ECE) that feed into aggregation weight calculation. The test split is held out and used only for final evaluation.
 
 ### Non-IID Data Splitting
 
@@ -339,11 +347,12 @@ python simulation/experiment.py --seeds 3 --epochs 5
 
 ```bash
 # Verify all cited statistics match experiment_results.csv
-python compute_stats.py
+# Output also saved to simulation/results/computed_stats.txt
+python simulation/compute_stats.py
 
-# Regenerate all 4 paper figures into figures/
+# Regenerate all paper figures into simulation/figures/
 pip install matplotlib
-python generate_figures.py
+python simulation/generate_figures.py
 ```
 
 ## Prerequisites
