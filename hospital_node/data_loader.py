@@ -36,7 +36,10 @@ def load_real_data(npz_path: str | None = None) -> Tuple[torch.Tensor, torch.Ten
     x = x / 255.0
     x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
     x = x.repeat(1, 3, 1, 1)
-    x = (x - 0.5) / 0.5
+    # ImageNet normalization (matches experiment.py pretrained backbone preprocessing)
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    x = (x - mean) / std
 
     y = torch.from_numpy(data[lbl_key]).long().view(-1)
     return x, y

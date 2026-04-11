@@ -146,17 +146,17 @@ def compute_ece(
 
 
 def assign_model(capacity_class: str, num_classes: int = NUM_CLASSES) -> nn.Module:
-    """Assign architecture by capacity class with task-specific output head."""
+    """Assign architecture by capacity class (ImageNet-pretrained) with task-specific output head."""
     if capacity_class == "Weak":
-        model = models.mobilenet_v3_small(weights=None)
+        model = models.mobilenet_v3_small(weights=models.MobileNet_V3_Small_Weights.IMAGENET1K_V1)
         model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
         return model
     if capacity_class == "Medium":
-        model = models.efficientnet_b0(weights=None)
+        model = models.efficientnet_b0(weights=models.EfficientNet_B0_Weights.IMAGENET1K_V1)
         model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
         return model
     if capacity_class == "Strong":
-        model = models.resnet50(weights=None)
+        model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
         model.fc = nn.Linear(model.fc.in_features, num_classes)
         return model
     raise ValueError(f"Unknown capacity class: {capacity_class}")
@@ -194,7 +194,10 @@ def load_pneumonia_npz(npz_path: str | None = None) -> Tuple[torch.Tensor, torch
     x = x / 255.0
     x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
     x = x.repeat(1, 3, 1, 1)
-    x = (x - 0.5) / 0.5
+    # ImageNet normalization (matches experiment.py pretrained backbone preprocessing)
+    mean = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
+    x = (x - mean) / std
 
     y = torch.from_numpy(labels).long().view(-1)
     return x, y
@@ -272,7 +275,7 @@ def mock_training_manager(
     hospital_id: int = 0,
     num_hospitals: int = 3,
     epochs: int = 1,
-    batch_size: int = 16,
+    batch_size: int = 32,
     max_samples: int = 512,
     private_key: str | None = None,
     run_poc: bool = True,
