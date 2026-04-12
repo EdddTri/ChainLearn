@@ -59,10 +59,11 @@ EPOCHS     = 15
 BATCH_SIZE = 32
 LR         = 0.001
 DEVICE     = "cuda" if torch.cuda.is_available() else "cpu"
-NUM_WORKERS = 16 if torch.cuda.is_available() else 0
+NUM_WORKERS = 4 if torch.cuda.is_available() else 0  # 4 per loader allows 8 parallel procs safely on 80-core CPU
 PIN_MEMORY  = torch.cuda.is_available()
 USE_AMP     = torch.cuda.is_available()
-AMP_DTYPE   = torch.bfloat16  # Blackwell compute cap 12.1 — native BF16 tensor cores
+AMP_DTYPE   = torch.bfloat16  # Ampere (RTX 3060) supports native BF16 tensor cores; no GradScaler needed
+USE_COMPILE = torch.cuda.is_available()  # torch.compile() — requires triton (Linux GPU server)
 SCALE      = 10_000
 
 # GPU optimizations
@@ -146,7 +147,20 @@ def load_dataset(name):
 
 
 def _extract_labels(dataset):
-    """Extract integer label array from a MedMNIST dataset."""
+    """Extract integer label array from a MedMNIST dataset.
+
+    Fast paths avoid iterating samples one-by-one (which applies transforms and
+    is extremely slow for large 224×224 resized datasets):
+      1. MedMNIST datasets expose a .labels numpy array directly.
+      2. torch.utils.data.Subset: index into the parent's labels array.
+    Falls back to the slow per-sample loop for other dataset types.
+    """
+    if hasattr(dataset, "labels"):
+        return np.array(dataset.labels).reshape(-1).astype(int)
+    if isinstance(dataset, torch.utils.data.Subset):
+        parent_labels = _extract_labels(dataset.dataset)
+        return parent_labels[np.array(dataset.indices)]
+    # Slow fallback for arbitrary dataset types
     labels = []
     for i in range(len(dataset)):
         _, label = dataset[i]
@@ -214,6 +228,12 @@ def get_model(capacity_class, num_classes):
     m = m.to(DEVICE)
     if torch.cuda.is_available():
         m = m.to(memory_format=torch.channels_last)
+    if USE_COMPILE:
+        try:
+            # reduce-overhead: fast compile, ~15-25% training speedup via kernel fusion
+            m = torch.compile(m, mode="reduce-overhead")
+        except Exception:
+            pass  # triton not available (e.g., Windows dev machine); skip silently
     return m
 
 
@@ -1252,21 +1272,29 @@ def print_adversarial_table(results, dataset_name, noniid_key,
 def main():
     parser = argparse.ArgumentParser(description="Federated Ensemble Learning Experiment")
     parser.add_argument("--seeds", type=int, default=5, help="Number of random seeds (default: 5)")
+    parser.add_argument("--seed-list", nargs="+", type=int, default=None,
+                        help="Explicit seed values to run (overrides --seeds; used by parallel launcher)")
     parser.add_argument("--datasets", nargs="+", default=list(DATASET_REGISTRY.keys()),
                         choices=list(DATASET_REGISTRY.keys()), help="Datasets to evaluate")
     parser.add_argument("--noniid", nargs="+", default=list(NON_IID_ALPHAS.keys()),
                         choices=list(NON_IID_ALPHAS.keys()), help="Non-IID levels")
     parser.add_argument("--epochs", type=int, default=EPOCHS, help="Training epochs per hospital")
     parser.add_argument("--resume", action="store_true", help="Skip (dataset, noniid, seed) combos already in CSV")
+    parser.add_argument("--output-csv", type=str, default=None,
+                        help="Path for output CSV (default: results/experiment_results.csv). "
+                             "Set per-process by parallel launcher to avoid concurrent write conflicts.")
     args = parser.parse_args()
 
     _epochs = args.epochs
 
-    seeds = list(range(42, 42 + args.seeds * 100, 100))[:args.seeds]
+    if args.seed_list:
+        seeds = args.seed_list
+    else:
+        seeds = list(range(42, 42 + args.seeds * 100, 100))[:args.seeds]
 
     # Load completed runs from CSV if resuming
     completed = set()
-    csv_path = os.path.join(RESULTS_DIR, "experiment_results.csv")
+    csv_path = args.output_csv or os.path.join(RESULTS_DIR, "experiment_results.csv")
     if args.resume and os.path.exists(csv_path):
         with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
@@ -1368,7 +1396,6 @@ def main():
                 )
 
     # ── Save raw results ──────────────────────────────────────────────────
-    csv_path = os.path.join(RESULTS_DIR, "experiment_results.csv")
     save_results_csv(all_raw_results, csv_path)
 
     t_total = time.time() - t_total_start
