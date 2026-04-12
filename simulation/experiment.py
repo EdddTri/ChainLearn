@@ -35,6 +35,7 @@ Usage:
 import argparse
 import copy
 import csv
+import gc
 import os
 import sys
 import time
@@ -212,6 +213,21 @@ def dirichlet_split(dataset, num_classes, alpha, seed):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  Memory Management
+# ═══════════════════════════════════════════════════════════════════════════
+def _cuda_cleanup():
+    """Force Python GC + release PyTorch's cached CUDA blocks back to the driver.
+
+    Called between training methods in run_single() because ~18 model instances
+    are created per seed; without explicit cleanup, peak GPU memory can exceed
+    16 GB on an RTX 4060 Ti (each ResNet-50 with Adam state ≈ 400 MB).
+    """
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  Model Factory
 # ═══════════════════════════════════════════════════════════════════════════
 def get_model(capacity_class, num_classes):
@@ -230,8 +246,9 @@ def get_model(capacity_class, num_classes):
         m = m.to(memory_format=torch.channels_last)
     if USE_COMPILE:
         try:
-            # reduce-overhead: fast compile, ~15-25% training speedup via kernel fusion
-            m = torch.compile(m, mode="reduce-overhead")
+            # "default" mode: kernel fusion without CUDA Graphs — avoids 3 GB private pool
+            # overhead that "reduce-overhead" creates (caused OOM when 2 procs shared a GPU)
+            m = torch.compile(m, mode="default")
         except Exception:
             pass  # triton not available (e.g., Windows dev machine); skip silently
     return m
@@ -706,6 +723,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
     central_model = get_model("Strong", num_classes)
     train_model(central_model, central_loader, epochs=epochs, label="Centralized")
     results["Centralized"] = dict(zip(("acc", "f1", "ece"), evaluate_model(central_model, test_loader)))
+    del central_model, central_loader
+    _cuda_cleanup()
 
     # ── 2. Local-only (capacity-aware models) ─────────────────────────────
     print("    [2/7] Local-only training...")
@@ -723,6 +742,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
         if acc > best_local_acc:
             best_local_acc = acc
             results["Local-Best"] = {"acc": acc, "f1": f1, "ece": ece}
+    del local_models
+    _cuda_cleanup()
 
     # ── 3. FedAvg (uniform ResNet-50, multi-round param averaging) ──────
     print("    [3/7] FedAvg training...")
@@ -739,6 +760,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
             local_models_fa.append(m)
         global_model = fedavg(local_models_fa, data_sizes=hospital_sizes)
     results["FedAvg"] = dict(zip(("acc", "f1", "ece"), evaluate_model(global_model, test_loader)))
+    del global_model, local_models_fa
+    _cuda_cleanup()
 
     # ── 3b. FedProx (uniform ResNet-50, multi-round with proximal term) ─
     print("    [4/7] FedProx training...")
@@ -753,6 +776,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
             local_models_fp.append(m)
         global_model_prox = fedavg(local_models_fp, data_sizes=hospital_sizes)
     results["FedProx"] = dict(zip(("acc", "f1", "ece"), evaluate_model(global_model_prox, test_loader)))
+    del global_model_prox, local_models_fp, global_state
+    _cuda_cleanup()
 
     # ── 3c. FedMD (heterogeneous KD via public data) ───────────────────
     print("    [5/7] FedMD training...")
@@ -784,6 +809,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
         ("acc", "f1", "ece"),
         evaluate_ensemble(fedmd_models, fedmd_eq, test_loader, num_classes),
     ))
+    del fedmd_models, consensus, public_loader, private_loaders
+    _cuda_cleanup()
 
     # ── 4. Ours (multi-round, full capacity-aware weights) ──────────────
     print("    [6/7] Training Ours & evaluating ensembles...")
@@ -845,6 +872,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
         ("acc", "f1", "ece"),
         evaluate_ensemble(dropout_models, [float(w) for w in dropout_weights], test_loader, num_classes),
     ))
+    del dropout_models
+    _cuda_cleanup()
 
     # ── 6-9. Ablations (weight formula variants, reuse ours_models) ───────
     for abl_name, abl_flags in ABLATIONS.items():
@@ -858,6 +887,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
             ("acc", "f1", "ece"),
             evaluate_ensemble(ours_models, [float(w) for w in abl_weights], test_loader, num_classes),
         ))
+    del ours_models
+    _cuda_cleanup()
 
     # ── 10. No-PoC ablation (uniform arch, equal cap_mul) ─────────────────
     print("    [7/7] No-PoC ablation training...")
@@ -878,6 +909,8 @@ def run_single(dataset_name, noniid_key, seed, train_ds, val_ds, test_ds, num_cl
         ("acc", "f1", "ece"),
         evaluate_ensemble(nopoc_models, [float(w) for w in nopoc_weights], test_loader, num_classes),
     ))
+    del nopoc_models
+    _cuda_cleanup()
 
     return results
 
@@ -1283,7 +1316,18 @@ def main():
     parser.add_argument("--output-csv", type=str, default=None,
                         help="Path for output CSV (default: results/experiment_results.csv). "
                              "Set per-process by parallel launcher to avoid concurrent write conflicts.")
+    parser.add_argument("--skip-adversarial", action="store_true",
+                        help="Skip adversarial experiments (launcher passes this for all seeds "
+                             "except the one matching compute_stats's adv_42 filter).")
     args = parser.parse_args()
+
+    # Expected method set per (dataset, noniid, seed) — used to detect partial
+    # (crashed) runs in --resume mode. Must match methods emitted by run_single().
+    EXPECTED_METHODS = {
+        "Centralized", "Local-Weak", "Local-Medium", "Local-Strong", "Local-Best",
+        "FedAvg", "FedProx", "FedMD", "Ours", "EqualWt-Ens", "Ours-Dropout",
+        "Abl:No CapMul", "Abl:No Conf", "Abl:No ECE", "Abl:No Bonus", "Abl:No PoC",
+    }
 
     _epochs = args.epochs
 
@@ -1292,19 +1336,29 @@ def main():
     else:
         seeds = list(range(42, 42 + args.seeds * 100, 100))[:args.seeds]
 
-    # Load completed runs from CSV if resuming
+    # Load completed runs from CSV if resuming. A combo only counts as complete
+    # when every EXPECTED_METHODS row is present; partial runs are rerun.
     completed = set()
     csv_path = args.output_csv or os.path.join(RESULTS_DIR, "experiment_results.csv")
     if args.resume and os.path.exists(csv_path):
+        combo_methods: dict = {}
         with open(csv_path, "r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 try:
                     seed_val = int(row["seed"])
-                    completed.add((row["dataset"], row["noniid"], seed_val))
                 except ValueError:
-                    pass  # adversarial rows have non-integer seeds like "adv_42"
-        print(f"Resuming: {len(completed)} (dataset, noniid, seed) combos already done")
+                    continue  # adversarial rows like "adv_42"
+                combo_methods.setdefault(
+                    (row["dataset"], row["noniid"], seed_val), set()
+                ).add(row["method"])
+        partial = 0
+        for key, methods in combo_methods.items():
+            if EXPECTED_METHODS.issubset(methods):
+                completed.add(key)
+            else:
+                partial += 1
+        print(f"Resuming: {len(completed)} combos complete; {partial} partial (will rerun)")
 
     print(f"Device:   {DEVICE}  |  AMP: {USE_AMP}  |  Batch: {BATCH_SIZE}  |  Workers: {NUM_WORKERS}")
     print(f"Seeds:    {seeds}")
@@ -1384,16 +1438,19 @@ def main():
     print_participation_sensitivity()
 
     # ── Adversarial / Cheating Experiments ────────────────────────────────
-    for dataset_name in args.datasets:
-        train_ds, val_ds, test_ds, num_classes = load_dataset(dataset_name)
-        for noniid_key in args.noniid:
-            for seed in seeds[:1]:  # one seed is enough for adversarial demo
-                run_adversarial_experiment(
-                    dataset_name, noniid_key, seed,
-                    train_ds, val_ds, test_ds, num_classes,
-                    epochs=_epochs,
-                    all_raw_results=all_raw_results,
-                )
+    if args.skip_adversarial:
+        print("\n  Skipping adversarial experiments (--skip-adversarial).")
+    else:
+        for dataset_name in args.datasets:
+            train_ds, val_ds, test_ds, num_classes = load_dataset(dataset_name)
+            for noniid_key in args.noniid:
+                for seed in seeds[:1]:  # one seed is enough for adversarial demo
+                    run_adversarial_experiment(
+                        dataset_name, noniid_key, seed,
+                        train_ds, val_ds, test_ds, num_classes,
+                        epochs=_epochs,
+                        all_raw_results=all_raw_results,
+                    )
 
     # ── Save raw results ──────────────────────────────────────────────────
     save_results_csv(all_raw_results, csv_path)

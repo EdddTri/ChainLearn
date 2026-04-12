@@ -77,20 +77,31 @@ def merge_csvs(tmp_files: list[Path], output: Path) -> int:
             writer.writeheader()
         writer.writerows(new_rows)
 
-    return len(rows)
+    return len(new_rows)
 
 
-def poll_processes(procs: list[dict]) -> list[dict]:
-    """Return list of still-running process dicts."""
+# Expected method rows per (dataset, noniid, seed) — used to detect partial/crashed runs.
+EXPECTED_METHODS = {
+    "Centralized", "Local-Weak", "Local-Medium", "Local-Strong", "Local-Best",
+    "FedAvg", "FedProx", "FedMD", "Ours", "EqualWt-Ens", "Ours-Dropout",
+    "Abl:No CapMul", "Abl:No Conf", "Abl:No ECE", "Abl:No Bonus", "Abl:No PoC",
+}
+
+
+def poll_processes(procs: list[dict], failed: list[dict]) -> list[dict]:
+    """Return list of still-running process dicts; append failures to `failed`."""
     for p in procs:
         if p["proc"].poll() is not None:
             p["done"] = True
             p["end_time"] = time.time()
+            p["returncode"] = p["proc"].returncode
             elapsed = p["end_time"] - p["start_time"]
-            status = "OK" if p["proc"].returncode == 0 else f"ERR({p['proc'].returncode})"
+            status = "OK" if p["returncode"] == 0 else f"ERR({p['returncode']})"
             print(f"  [{status}] GPU {p['gpu']:d} | {p['dataset']:>16} | "
                   f"{p['noniid']:>8} | seed={p['seed']:4d} | {elapsed/60:.1f} min",
                   flush=True)
+            if p["returncode"] != 0:
+                failed.append(p)
     return [p for p in procs if not p.get("done")]
 
 
@@ -164,17 +175,26 @@ def main():
     # ── Build task list ───────────────────────────────────────────────────────
     all_tasks = list(product(args.datasets, args.noniid, seeds))
 
-    # Filter already-completed if --resume
+    # Filter already-completed if --resume: a combo counts as done only when
+    # every EXPECTED_METHODS row is present. Partial rows from crashed jobs are rerun.
     skip = set()
     master_csv = RESULTS_DIR / "experiment_results.csv"
     if args.resume and master_csv.exists():
+        combo_methods: dict = {}
         with open(master_csv, newline="", encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
                 try:
-                    skip.add((row["dataset"], row["noniid"], int(row["seed"])))
+                    key = (row["dataset"], row["noniid"], int(row["seed"]))
                 except (ValueError, KeyError):
-                    pass
-        print(f"Resuming: {len(skip)} combos already done, skipping them")
+                    continue  # adversarial rows with non-int seeds
+                combo_methods.setdefault(key, set()).add(row["method"])
+        partial = 0
+        for key, methods in combo_methods.items():
+            if EXPECTED_METHODS.issubset(methods):
+                skip.add(key)
+            else:
+                partial += 1
+        print(f"Resuming: {len(skip)} combos complete; {partial} partial (will rerun)")
 
     tasks = [(ds, noniid, seed) for ds, noniid, seed in all_tasks
              if (ds, noniid, seed) not in skip]
@@ -191,22 +211,29 @@ def main():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     tmp_csvs: list[Path] = []
     running: list[dict] = []
-    gpu_counter = 0
+    failed: list[dict] = []
     t_start = time.time()
     HEARTBEAT_EVERY = 30  # seconds
     last_heartbeat = time.time()
 
+    # Run adversarial experiments only for tasks whose seed matches compute_stats's
+    # filter (adv_42). Every other subprocess skips adversarial to save time and avoid
+    # emitting adv_142/242/... rows that the stats script ignores.
+    ADVERSARIAL_SEED = DEFAULT_SEEDS[0]  # 42
+
     for task_idx, (dataset, noniid, seed) in enumerate(tasks):
-        # Wait until a GPU slot is free
-        while len(running) >= num_gpus:
-            time.sleep(3)
-            running = poll_processes(running)
+        # Wait until a GPU is actually free (not just any slot)
+        while True:
+            running = poll_processes(running, failed)
+            used_gpus = {p["gpu"] for p in running}
+            free_gpus = [g for g in range(num_gpus) if g not in used_gpus]
+            if free_gpus:
+                gpu_id = free_gpus[0]
+                break
             if time.time() - last_heartbeat > HEARTBEAT_EVERY and running:
                 print_heartbeat(running)
                 last_heartbeat = time.time()
-
-        gpu_id = gpu_counter % num_gpus
-        gpu_counter += 1
+            time.sleep(3)
 
         tmp_csv = RESULTS_DIR / f"_tmp_{task_idx:04d}_{dataset}_{noniid}_{seed}.csv"
         tmp_csvs.append(tmp_csv)
@@ -214,6 +241,8 @@ def main():
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
         env["PYTHONUNBUFFERED"] = "1"  # ensure subprocess stdout is line-buffered -> heartbeat sees live tail
+        # Reduces CUDA memory fragmentation — recommended by the OOM error itself
+        env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
         cmd = [
             sys.executable, str(SCRIPT),
@@ -223,6 +252,8 @@ def main():
             "--epochs",   str(args.epochs),
             "--output-csv", str(tmp_csv),
         ]
+        if seed != ADVERSARIAL_SEED:
+            cmd.append("--skip-adversarial")
 
         log_path = RESULTS_DIR / f"_log_{task_idx:04d}_{dataset}_{noniid}_{seed}.txt"
         log_fh = open(log_path, "w", encoding="utf-8")
@@ -244,7 +275,7 @@ def main():
     # Wait for all remaining jobs
     while running:
         time.sleep(3)
-        running = poll_processes(running)
+        running = poll_processes(running, failed)
         if time.time() - last_heartbeat > HEARTBEAT_EVERY and running:
             print_heartbeat(running)
             last_heartbeat = time.time()
@@ -263,10 +294,19 @@ def main():
 
     # ── Summary ───────────────────────────────────────────────────────────────
     cost = (elapsed_total / 3600) * HOURLY_RATE
+    succeeded = len(tasks) - len(failed)
+    status_label = "DONE" if not failed else "DONE WITH FAILURES"
     print(f"\n{'='*60}")
-    print(f"  DONE  |  Wall-clock: {elapsed_total/60:.1f} min  |  Cost: ${cost:.3f}")
-    print(f"  Configs completed: {len(tasks)}")
+    print(f"  {status_label}  |  Wall-clock: {elapsed_total/60:.1f} min  |  Cost: ${cost:.3f}")
+    print(f"  Configs: {succeeded} succeeded, {len(failed)} failed, {len(tasks)} total")
+    if failed:
+        print(f"  Failed jobs (rerun with --resume to retry):")
+        for p in failed:
+            print(f"    - GPU {p['gpu']} | {p['dataset']} | {p['noniid']} | "
+                  f"seed={p['seed']} | rc={p.get('returncode')} | log={p['log_path']}")
     print(f"{'='*60}")
+    if failed:
+        sys.exit(1)
     print(f"\nNext steps:")
     print(f"  python simulation/compute_stats.py")
     print(f"  python simulation/generate_figures.py")
