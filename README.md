@@ -377,7 +377,7 @@ python simulation/generate_figures.py
 3. **Weight cap at 15,000** -- Prevents any single hospital from dominating the ensemble (max 1.5x multiplier).
 4. **EIP-191 signatures** -- PoC benchmark results are signed by the hospital's private key and verified on-chain. The contract confirms *who* signed the benchmark hash, but the capacity class is a separate parameter set by the contract owner at registration. This means PoC provides an auditable identity link, not automatic capacity verification.
 5. **Model type enforcement** -- The contract rejects submissions where the model type doesn't match the hospital's assigned architecture, ensuring the capacity-aware design is respected.
-6. **Minimal communication** -- Only hashes and scalar metrics are sent on-chain (~224 bytes per hospital per round), compared to ~94 MB for FedAvg parameter sharing.
+6. **Minimal communication** -- Only hashes and scalar metrics are sent on-chain (~224 bytes per hospital per round), compared to ~102 MB for FedAvg parameter sharing (ResNet-50, one direction).
 7. **Quality-aware weighting** -- The weight formula naturally downweights low-confidence or poorly calibrated models when metrics are reported honestly. This provides a passive defense but does not verify metric truthfulness; adversarial experiments quantify the impact of dishonest reporting.
 
 ## Limitations
