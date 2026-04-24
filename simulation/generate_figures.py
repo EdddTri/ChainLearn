@@ -86,7 +86,7 @@ def fig_accuracy(rows, dataset):
     width     = 0.11
     x         = np.arange(n_groups)
 
-    fig, ax = plt.subplots(figsize=(3.5, 2.6))
+    fig, ax = plt.subplots(figsize=(4.5, 2.6))
 
     for i, (method, label) in enumerate(zip(methods, short)):
         means, errs = [], []
@@ -107,14 +107,15 @@ def fig_accuracy(rows, dataset):
     ax.set_ylabel("Accuracy")
     ax.set_ylim(0.35, 1.02)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}"))
-    ax.legend(ncol=2, loc="upper right", framealpha=0.9,
-              handlelength=1.2, handleheight=0.9)
+    ax.legend(ncol=2, loc="upper center", framealpha=0.95,
+              handlelength=0.9, handleheight=0.7, fontsize=6.5,
+              bbox_to_anchor=(0.5, -0.22), borderpad=0.3, frameon=True)
     ax.set_title(f"Accuracy by method and non-IID level — {DATASET_LABELS[dataset]}\n(mean ± std, 5 seeds)")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.1, right=0.98, top=0.82, bottom=0.28)
     out = FIGURES_DIR / f"fig1_accuracy_{dataset}.pdf"
-    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(out, bbox_inches="tight", pad_inches=0.08)
     plt.close(fig)
     print(f"  Saved {out}")
 
@@ -129,7 +130,7 @@ def fig_ece(rows, dataset):
     width     = 0.15
     x         = np.arange(len(noniids))
 
-    fig, ax = plt.subplots(figsize=(3.5, 2.4))
+    fig, ax = plt.subplots(figsize=(4.2, 2.6))
 
     for i, (method, label) in enumerate(zip(methods, short)):
         means, errs = [], []
@@ -149,14 +150,15 @@ def fig_ece(rows, dataset):
     ax.set_xticklabels([NONIID_LABELS[n] for n in noniids])
     ax.set_ylabel("ECE (lower is better)")
     ax.set_ylim(0, 0.50)
-    ax.legend(ncol=2, loc="upper left", framealpha=0.9,
-              handlelength=1.2, handleheight=0.9)
+    ax.legend(ncol=2, loc="upper center", framealpha=0.95,
+              handlelength=0.9, handleheight=0.7, fontsize=6.5,
+              bbox_to_anchor=(0.5, -0.22), borderpad=0.3, frameon=True)
     ax.set_title(f"Calibration error by method and non-IID level — {DATASET_LABELS[dataset]}\n(mean ± std, 5 seeds)")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.1, right=0.98, top=0.82, bottom=0.28)
     out = FIGURES_DIR / f"fig2_ece_{dataset}.pdf"
-    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(out, bbox_inches="tight", pad_inches=0.08)
     plt.close(fig)
     print(f"  Saved {out}")
 
@@ -223,7 +225,7 @@ def fig_ablation(rows, dataset):
     width   = 0.13
     x       = np.arange(len(noniids))
 
-    fig, ax = plt.subplots(figsize=(3.5, 2.6))
+    fig, ax = plt.subplots(figsize=(4.8, 2.8))
 
     for i, (comp, label) in enumerate(zip(components, short)):
         means, errs = [], []
@@ -242,16 +244,17 @@ def fig_ablation(rows, dataset):
     ax.set_xticks(x)
     ax.set_xticklabels([NONIID_LABELS[n] for n in noniids])
     ax.set_ylabel("Accuracy")
-    ax.set_ylim(0.45, 0.92)
+    ax.set_ylim(0.45, 0.94)
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v:.2f}"))
-    ax.legend(ncol=2, loc="upper right", framealpha=0.9,
-              handlelength=1.2, handleheight=0.9)
+    ax.legend(ncol=3, loc="upper center", framealpha=0.95,
+              handlelength=0.8, handleheight=0.7, fontsize=6.0,
+              bbox_to_anchor=(0.5, -0.22), borderpad=0.3, frameon=True)
     ax.set_title(f"Ablation study — accuracy per component removed — {DATASET_LABELS[dataset]}\n(mean ± std, 5 seeds)")
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    fig.tight_layout()
+    fig.subplots_adjust(left=0.1, right=0.98, top=0.82, bottom=0.32)
     out = FIGURES_DIR / f"fig3_ablation_{dataset}.pdf"
-    fig.savefig(out, bbox_inches="tight")
+    fig.savefig(out, bbox_inches="tight", pad_inches=0.08)
     plt.close(fig)
     print(f"  Saved {out}")
 
