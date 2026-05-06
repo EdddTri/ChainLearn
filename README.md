@@ -8,15 +8,15 @@ Traditional federated learning assumes homogeneous compute across participants a
 
 This project addresses both problems:
 
-1. **Capacity-aware model assignment** -- A Proof of Capacity benchmark classifies each hospital node as Weak, Medium, or Strong, then assigns an architecture sized to its hardware (MobileNet, EfficientNet-B0, or ResNet-50).
+1. **Capacity-aware model assignment** -- A Proof of Capacity benchmark classifies each hospital node as Weak, Medium, or Strong, then assigns an architecture sized to its hardware (MobileNetV3-Small, EfficientNet-B0, or ResNet-50).
 2. **Ensemble prediction instead of parameter aggregation** -- Since each hospital trains a different architecture, predictions are combined via weighted softmax averaging rather than weight averaging.
 3. **Deterministic weight formula** -- Aggregation weights are computed using a fixed-point formula based on capacity class, model confidence, calibration error (ECE), and participation history. The formula is implemented both in the Solidity smart contract (for on-chain transparency and auditability) and mirrored in Python (for experiment evaluation). Both implementations produce identical results.
 
 ## System Architecture
 
 ```
-Hospital Node A          Hospital Node B          Hospital Node C
-(Weak / MobileNet)       (Medium / EfficientNet)  (Strong / ResNet-50)
+Hospital Node A              Hospital Node B          Hospital Node C
+(Weak / MobileNetV3-Small)   (Medium / EfficientNet)  (Strong / ResNet-50)
        |                        |                        |
        |-- PoC Benchmark -------|------------------------|
        |                        |                        |
@@ -43,9 +43,9 @@ Hospital Node A          Hospital Node B          Hospital Node C
 
 ### 1. Proof of Capacity (PoC) Benchmark
 Each hospital runs a fixed K-step SGD benchmark on a small CNN to measure compute throughput (samples/sec):
-- **Weak** (< 100 samples/sec) -- assigned **MobileNet-V3-Small**
-- **Medium** (100-300 samples/sec) -- assigned **EfficientNet-B0**
-- **Strong** (>= 300 samples/sec) -- assigned **ResNet-50**
+- **Weak** (< 100 samples/sec) -- assigned **MobileNetV3-Small**
+- **Medium** (100–300 samples/sec) -- assigned **EfficientNet-B0**
+- **Strong** (≥ 300 samples/sec) -- assigned **ResNet-50**
 
 The benchmark result is hashed (SHA-256) and signed with the hospital's private key (EIP-191).
 
@@ -133,7 +133,7 @@ ChainLearn/
 
 **`hospital_node/data_loader.py`** -- Loads PneumoniaMNIST from local NPZ files, with an optional synthetic data fallback for debugging.
 
-**`hospital_node/model.py`** -- Simple `FederatedCNN` used for basic experiments. The capacity-aware system uses MobileNet/EfficientNet/ResNet instead.
+**`hospital_node/model.py`** -- Simple `FederatedCNN` used for basic experiments. The capacity-aware system uses MobileNetV3-Small/EfficientNet-B0/ResNet-50 instead.
 
 **`simulation/run_simulation.py`** -- End-to-end simulation that automatically starts a Hardhat node, deploys the contract, registers 3 hospitals with signed PoC, runs multi-round training, reads on-chain weights, computes weighted ensemble prediction, and records the ensemble hash on-chain.
 
@@ -179,12 +179,12 @@ Written in Solidity 0.8.24, deployed on a local Hardhat network.
 
 | Method | Description |
 |---|---|
-| **Centralized** | ResNet-50 trained on all pooled data (upper bound) |
+| **Centralized** | ResNet-50 trained on all pooled data (reference baseline, not upper bound) |
 | **Local-Best** | Best single-hospital model by accuracy |
 | **Local-Weak/Medium/Strong** | Individual hospital models |
 | **FedAvg** | Multi-round FL: all hospitals train ResNet-50, data-proportional parameter averaging, 5 rounds |
 | **FedProx** | Multi-round FedAvg + proximal regularization term `(mu/2) * \|\|w - w_global\|\|^2`, 5 rounds |
-| **FedMD** | Heterogeneous knowledge distillation via public dataset consensus logits |
+| **FedMD** | Heterogeneous knowledge distillation via temperature-scaled consensus probabilities |
 | **EqualWt-Ens** | Same multi-round trained models as Ours, but with uniform weights (1/3 each) |
 | **Ours** | 3 capacity-assigned models, multi-round training, on-chain capacity-aware weights with participation bonus |
 | **Ours-Dropout** | Same as Ours but with realistic dropout (Weak=100%, Medium=80%, Strong=60% per-round attendance) |
@@ -204,7 +204,7 @@ loss = CrossEntropy(pred, label) + (mu / 2) * ||w_local - w_global||^2
 FedMD (Federated Model Distillation) supports heterogeneous architectures like our method. It works by:
 1. Splitting 10% of training data as a shared public dataset.
 2. Each hospital trains its capacity-assigned model on its private shard.
-3. All models compute softmax probabilities on the public dataset (temperature = 3.0); these are averaged into consensus probabilities.
+3. All models compute temperature-scaled softmax probabilities on the public dataset (temperature = 3.0); these are averaged into consensus probabilities.
 4. Each model distills the consensus via KL divergence on the public set.
 5. Final prediction is an equal-weight ensemble of the distilled models.
 
@@ -379,21 +379,3 @@ python simulation/generate_figures.py
 5. **Model type enforcement** -- The contract rejects submissions where the model type doesn't match the hospital's assigned architecture, ensuring the capacity-aware design is respected.
 6. **Minimal communication** -- Only hashes and scalar metrics are sent on-chain (~224 bytes per hospital per round), compared to ~102 MB for FedAvg parameter sharing (ResNet-50, one direction).
 7. **Quality-aware weighting** -- The weight formula naturally downweights low-confidence or poorly calibrated models when metrics are reported honestly. This provides a passive defense but does not verify metric truthfulness; adversarial experiments quantify the impact of dishonest reporting.
-
-## Limitations
-
-1. **Metrics are self-reported** -- Confidence and ECE are submitted by each hospital with no verification. Our adversarial experiments quantify the impact of dishonest reporting.
-2. **No data poisoning defense** -- A hospital can train on corrupted data while reporting honest metrics. Backdoor attacks that perform well on clean evaluation data are not detected.
-3. **Benchmark replay** -- A hospital could run PoC on rented hardware, obtain a "Strong" signature, then train on weaker hardware. The signed hash is valid but may not reflect current capability.
-4. **Experiments use Python-mirrored weights** -- The experiment pipeline computes weights using a Python function (`compute_weight`) that mirrors the Solidity `calculateWeightPure` formula exactly. Gas costs are estimated from Hardhat tests, not from actual on-chain experiment execution.
-
-## Future Work
-
-1. Decentralized metric attestation (e.g., peer or committee-based validation with dispute resolution)
-2. Robust aggregation and poisoning defenses (Byzantine-resilient scoring/filtering)
-3. Periodic or challenge-based re-benchmarking to prevent stale capacity claims
-4. Full on-chain execution benchmarks on a live network for end-to-end gas validation
-
-## License
-
-MIT
