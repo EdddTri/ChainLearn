@@ -1,10 +1,13 @@
-# Dependencies
+# Node / Hardhat
 node_modules/
-
-# Build artifacts
+package-lock.json
 smart_contracts/artifacts/
 smart_contracts/cache/
 smart_contracts/typechain-types/
+smart_contracts/coverage/
+smart_contracts/coverage.json
+smart_contracts/.appdata/
+smart_contracts/.localappdata/
 
 # Python
 __pycache__/
@@ -16,19 +19,35 @@ build/
 venv/
 .venv/
 
-# Model files
+# Model & data artifacts
 *.pt
 *.pth
 hospital_node/models/
 hospital_node/data/
+simulation/data/
 
-# Environment
+# Environment / secrets
 .env
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
-
-# OS
 .DS_Store
 Thumbs.db
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+
+# Draft / scratch files
+_paper_*.txt
+_pdf_*.txt
+_tmp_*/
+tmp_*.txt
